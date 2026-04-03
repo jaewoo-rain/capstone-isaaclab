@@ -103,6 +103,7 @@ class GraspFrankaEnvCfg(DirectRLEnvCfg):
     arm_action_scale = 0.02   # 0.04 -> 0.02, 제어 더 안정적으로
     gripper_open_target = 0.04
     gripper_close_target = 0.0
+    gripper_action_scale = 0.01 # 그리퍼 속도
 
     # ---------------------------------------------------------------------
     # 리셋 랜덤 범위
@@ -130,7 +131,7 @@ class GraspFrankaEnvCfg(DirectRLEnvCfg):
 
     rew_reach = 0.5 # reach 보상 줄임
     rew_align = 0.0
-    rew_grasp = 8.0 # grasp 보상 비중 높임
-    rew_lift = 2.0
+    rew_grasp = 5.0 # grasp 보상 비중 높임
+    rew_lift = 10.0
     rew_action_penalty = -0.005
     rew_joint_vel_penalty = -0.0005

@@ -26,3 +26,6 @@ export PYTHONPATH=/home/jaewoo/IsaacLab/source:$PYTHONPATH
 ./isaaclab.sh -p source/my_grasp_rl/scripts/play.py --task stacking --num_envs 1
 ./isaaclab.sh -p source/my_grasp_rl/scripts/play.py --task good --num_envs 1
 ./isaaclab.sh -p source/my_grasp_rl/scripts/play.py --task grasp --num_envs 1
+
+# URDF
+saacsim/extscache/isaacsim.asset.importer.urdf-2.3.10+106.4.0.lx64.r.cp310/data/urdf/robots/franka_description/robots/panda_arm_hand.urdf

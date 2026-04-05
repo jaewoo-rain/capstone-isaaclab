@@ -1,4 +1,3 @@
-
 """SB3 PPO 공용 학습 스크립트 (grasp / stacking / good 공용).
 
 기능:
@@ -7,11 +6,13 @@
 3. --resume 으로 기존 체크포인트 이어서 학습 가능
 4. --no 옵션으로 학습 후 모델/VecNormalize 저장 안 하도록 설정 가능
 5. --name 옵션으로 checkpoints에 저장할 이름을 직접 지정 가능
+6. 2000 step마다 현재 진행률과 남은 steps 출력
 """
 
 import argparse
 import os
 import sys
+import time
 
 from isaaclab.app import AppLauncher
 
@@ -71,8 +72,6 @@ parser.add_argument(
 )
 
 # 체크포인트 이름 커스텀
-# 예: --name exp1
-# 그러면 저장 파일명이 prefix_exp1_ppo.zip 같은 형태가 됨
 parser.add_argument(
     "--name",
     type=str,
@@ -101,6 +100,7 @@ simulation_app = app_launcher.app
 # ---------------------------------------------------------------------
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.callbacks import BaseCallback
 
 from my_grasp_rl.tasks.sb3_ppo_cfg import SB3_PPO_CFG
 
@@ -111,6 +111,63 @@ except Exception as e:
         "isaaclab_rl의 SB3 wrapper를 불러오지 못했습니다. "
         "Isaac Lab 버전에 맞는 wrapper 경로를 확인하세요."
     ) from e
+
+
+class ProgressCallback(BaseCallback):
+    """학습 진행률을 일정 step마다 출력하는 callback."""
+
+    def __init__(self, total_timesteps: int, print_interval: int = 2000, verbose: int = 0):
+        super().__init__(verbose)
+        self.total_timesteps_target = total_timesteps
+        self.print_interval = print_interval
+
+        self.last_print_step = 0
+        self.start_time = None
+
+        # 이번 학습 세션이 시작될 때의 누적 step 저장
+        self.start_step = 0
+
+    def _on_training_start(self) -> None:
+        self.start_time = time.time()
+
+        # resume 여부와 상관없이, 학습 시작 시점의 누적 step을 저장
+        self.start_step = self.num_timesteps
+        self.last_print_step = 0
+
+        print("📈 학습 진행 상황 출력 시작")
+        print(f"   total timesteps : {self.total_timesteps_target}")
+        print(f"   print interval  : {self.print_interval}")
+        print(f"   start step      : {self.start_step}")
+
+    def _on_step(self) -> bool:
+        # 전체 누적 step
+        global_step = self.num_timesteps
+
+        # 이번 세션에서 진행한 step
+        current_step = global_step - self.start_step
+
+        if current_step - self.last_print_step >= self.print_interval:
+            self.last_print_step = current_step
+
+            remaining_steps = max(self.total_timesteps_target - current_step, 0)
+            progress_percent = (current_step / self.total_timesteps_target) * 100.0
+            progress_percent = min(progress_percent, 100.0)
+
+            elapsed = time.time() - self.start_time if self.start_time is not None else 0.0
+
+            print(
+                f"📊 Step: {current_step}/{self.total_timesteps_target} "
+                f"({progress_percent:.2f}%) | 남은 steps: {remaining_steps} "
+                f"| 누적 global step: {global_step} "
+                f"| 경과 시간: {elapsed:.1f}s"
+            )
+
+        return True
+
+    def _on_training_end(self) -> None:
+        elapsed = time.time() - self.start_time if self.start_time is not None else 0.0
+        print("✅ 학습 종료")
+        print(f"   총 경과 시간: {elapsed:.1f}s")
 
 
 def build_task(task_name: str):
@@ -167,11 +224,6 @@ def main():
     # -------------------------------------------------------------
     # 저장 이름 결정
     # -------------------------------------------------------------
-    # --name 이 있으면 prefix 뒤에 붙여서 저장 이름 생성
-    # 예:
-    #   prefix = stacking_franka
-    #   --name exp1
-    #   => save_name = stacking_franka_exp1
     if args_cli.name is not None:
         save_name = args_cli.name
     else:
@@ -190,6 +242,14 @@ def main():
     # -------------------------------------------------------------
     env = env_class(cfg=cfg, render_mode=None)
     env = Sb3VecEnvWrapper(env)
+
+    # -------------------------------------------------------------
+    # 진행 상황 callback 생성
+    # -------------------------------------------------------------
+    progress_callback = ProgressCallback(
+        total_timesteps=args_cli.timesteps,
+        print_interval=20000,
+    )
 
     # -------------------------------------------------------------
     # resume 여부에 따라 이어서 학습 / 새 학습 분기
@@ -217,6 +277,7 @@ def main():
         model.learn(
             total_timesteps=args_cli.timesteps,
             reset_num_timesteps=False,
+            callback=progress_callback,
         )
 
     else:
@@ -250,6 +311,7 @@ def main():
         model.learn(
             total_timesteps=args_cli.timesteps,
             reset_num_timesteps=True,
+            callback=progress_callback,
         )
 
     # -------------------------------------------------------------

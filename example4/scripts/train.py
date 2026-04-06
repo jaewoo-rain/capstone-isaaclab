@@ -1,3 +1,4 @@
+
 """SB3 PPO 학습 스크립트 — Franka Lift"""
 
 import argparse
@@ -8,12 +9,26 @@ import time
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Train PPO for Franka Lift Task")
-parser.add_argument("--num_envs",   type=int,   default=256)
-parser.add_argument("--seed",       type=int,   default=42)
-parser.add_argument("--timesteps",  type=int,   default=5_000_000)
-parser.add_argument("--resume",     action="store_true")
-parser.add_argument("--no_save",    action="store_true")
-parser.add_argument("--name",       type=str,   default="example4")
+parser.add_argument("--num_envs", type=int, default=256)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--timesteps", type=int, default=5_000_000)
+parser.add_argument("--resume", action="store_true")
+parser.add_argument("--no_save", action="store_true")
+parser.add_argument("--name", type=str, default="example4")
+
+# 추가: 특정 체크포인트 불러오기
+parser.add_argument(
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="불러올 PPO checkpoint(.zip) 경로. 예: checkpoints/example4_step500000.zip",
+)
+parser.add_argument(
+    "--vecnorm",
+    type=str,
+    default=None,
+    help="불러올 VecNormalize pkl 경로. 미지정 시 checkpoint 이름 기준으로 자동 추론",
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -55,14 +70,14 @@ class TrainCallback(BaseCallback):
         super().__init__(verbose=0)
         self.total_timesteps_target = total_timesteps
         self.checkpoint_path = checkpoint_path
-        self.vecnorm_path    = vecnorm_path
-        self.env_ref         = env_ref          # LiftEnv 인스턴스 직접 참조
-        self.save_interval   = save_interval
-        self.print_interval  = print_interval
-        self.last_print      = 0
-        self.last_save       = 0
-        self.start_time      = None
-        self._reward_log_buf = {}               # reward 항목 누적 버퍼
+        self.vecnorm_path = vecnorm_path
+        self.env_ref = env_ref
+        self.save_interval = save_interval
+        self.print_interval = print_interval
+        self.last_print = 0
+        self.last_save = 0
+        self.start_time = None
+        self._reward_log_buf = {}
 
     def _on_training_start(self):
         self.start_time = time.time()
@@ -71,19 +86,17 @@ class TrainCallback(BaseCallback):
         print("=" * 60)
 
     def _on_step(self) -> bool:
-        # ── reward_log 버퍼에 누적 ──────────────────────────────
         for k, v in self.env_ref.reward_log.items():
             self._reward_log_buf.setdefault(k, []).append(v)
 
         step = self.num_timesteps
 
-        # ── 진행 출력 ───────────────────────────────────────────
         if step - self.last_print >= self.print_interval:
             self.last_print = step
-            elapsed  = time.time() - self.start_time
-            sps      = step / elapsed if elapsed > 0 else 0
+            elapsed = time.time() - self.start_time
+            sps = step / elapsed if elapsed > 0 else 0
             remain_s = (self.total_timesteps_target - step) / sps if sps > 0 else 0
-            pct      = step / self.total_timesteps_target * 100
+            pct = step / self.total_timesteps_target * 100
 
             mean_reward = 0.0
             if len(self.model.ep_info_buffer) > 0:
@@ -99,11 +112,14 @@ class TrainCallback(BaseCallback):
                 f"남은시간={remain_s/60:.1f}min"
             )
 
-            # reward 세부 항목
             reward_keys = [
-                "dist_reward", "approach_reward", "xy_align_reward", "z_align_reward",
-                "pre_grasp_reward", "close_reward", "grasp_bonus", 
-                "lift_reward", "success_rate",
+                "xy_align_reward",
+                "z_align_reward",
+                "approach_reward",
+                "close_reward",
+                "grasp_bonus",
+                "lift_reward",
+                "success_rate",
             ]
             parts = []
             for key in reward_keys:
@@ -113,10 +129,8 @@ class TrainCallback(BaseCallback):
                 )
             print("  └─ " + " | ".join(parts))
 
-            # 버퍼 초기화
             self._reward_log_buf.clear()
 
-        # ── 주기적 체크포인트 저장 ──────────────────────────────
         if step - self.last_save >= self.save_interval:
             self.last_save = step
             ckpt = f"{self.checkpoint_path}_step{step}"
@@ -129,57 +143,122 @@ class TrainCallback(BaseCallback):
 
 
 # ------------------------------------------------------------------
+# 유틸
+# ------------------------------------------------------------------
+def infer_vecnorm_path_from_checkpoint(checkpoint_path: str) -> str:
+    """
+    checkpoints/a.zip -> checkpoints/a_vecnorm.pkl
+    checkpoints/a     -> checkpoints/a_vecnorm.pkl
+    """
+    base, ext = os.path.splitext(checkpoint_path)
+    if ext == ".zip":
+        return f"{base}_vecnorm.pkl"
+    return f"{checkpoint_path}_vecnorm.pkl"
+
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 def main():
     cfg = LiftEnvCfg()
     cfg.scene.num_envs = args_cli.num_envs
 
-    checkpoint_dir  = "checkpoints"
+    checkpoint_dir = "checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(checkpoint_dir, args_cli.name)
-    vecnorm_path    = os.path.join(checkpoint_dir, f"{args_cli.name}_vecnorm.pkl")
+
+    default_checkpoint_path = os.path.join(checkpoint_dir, args_cli.name)
+    default_vecnorm_path = os.path.join(checkpoint_dir, f"{args_cli.name}_vecnorm.pkl")
 
     # ------------------------------------------------------------------
-    # Env 생성 — raw_env 참조 보관 후 wrapper 적용
+    # Env 생성
     # ------------------------------------------------------------------
     raw_env = LiftEnv(cfg=cfg)
-    env     = Sb3VecEnvWrapper(raw_env)
+    env = Sb3VecEnvWrapper(raw_env)
 
     # ------------------------------------------------------------------
     # PPO 하이퍼파라미터
     # ------------------------------------------------------------------
     ppo_kwargs = dict(
-        learning_rate = cfg.learning_rate,
-        n_steps       = cfg.n_steps,
-        batch_size    = cfg.batch_size,
-        n_epochs      = cfg.n_epochs,
-        gamma         = cfg.gamma,
-        gae_lambda    = cfg.gae_lambda,
-        clip_range    = cfg.clip_range,
-        ent_coef      = cfg.ent_coef,
-        vf_coef       = cfg.vf_coef,
-        max_grad_norm = 1.0,
-        verbose       = 1,
+        learning_rate=cfg.learning_rate,
+        n_steps=cfg.n_steps,
+        batch_size=cfg.batch_size,
+        n_epochs=cfg.n_epochs,
+        gamma=cfg.gamma,
+        gae_lambda=cfg.gae_lambda,
+        clip_range=cfg.clip_range,
+        ent_coef=cfg.ent_coef,
+        vf_coef=cfg.vf_coef,
+        max_grad_norm=1.0,
+        verbose=1,
     )
 
     # ------------------------------------------------------------------
-    # Resume or 신규 학습
+    # 로드 경로 결정
     # ------------------------------------------------------------------
-    has_ckpt    = os.path.exists(checkpoint_path + ".zip")
-    has_vecnorm = os.path.exists(vecnorm_path)
+    load_checkpoint_path = None
+    load_vecnorm_path = None
 
-    if args_cli.resume and has_ckpt and has_vecnorm:
-        print(f"🔄 이어서 학습: {checkpoint_path}")
-        env = VecNormalize.load(vecnorm_path, env)
-        env.training    = True
-        env.norm_reward = True
-        model = PPO.load(checkpoint_path, env=env, device="cuda", **ppo_kwargs)
+    if args_cli.checkpoint is not None:
+        load_checkpoint_path = args_cli.checkpoint
+        load_vecnorm_path = (
+            args_cli.vecnorm
+            if args_cli.vecnorm is not None
+            else infer_vecnorm_path_from_checkpoint(args_cli.checkpoint)
+        )
+    elif args_cli.resume:
+        load_checkpoint_path = default_checkpoint_path + ".zip"
+        load_vecnorm_path = default_vecnorm_path
+
+    # 최종 저장 기준 이름
+    checkpoint_path = default_checkpoint_path
+    vecnorm_path = default_vecnorm_path
+
+    # ------------------------------------------------------------------
+    # 체크포인트 로드 or 신규 학습
+    # ------------------------------------------------------------------
+    if load_checkpoint_path is not None:
+        has_ckpt = os.path.exists(load_checkpoint_path)
+        has_vecnorm = os.path.exists(load_vecnorm_path)
+
+        if has_ckpt and has_vecnorm:
+            print(f"🔄 체크포인트 로드: {load_checkpoint_path}")
+            print(f"🔄 VecNormalize 로드: {load_vecnorm_path}")
+
+            env = VecNormalize.load(load_vecnorm_path, env)
+            env.training = True
+            env.norm_reward = True
+
+            model = PPO.load(
+                load_checkpoint_path,
+                env=env,
+                device="cuda",
+                **ppo_kwargs,
+            )
+
+            # 저장 이름도 로드한 checkpoint 기준으로 맞추고 싶으면 base 사용
+            load_base, ext = os.path.splitext(load_checkpoint_path)
+            if ext == ".zip":
+                checkpoint_path = load_base
+            else:
+                checkpoint_path = load_checkpoint_path
+            vecnorm_path = infer_vecnorm_path_from_checkpoint(checkpoint_path)
+
+        else:
+            print("⚠️ 지정한 checkpoint 또는 vecnorm 파일이 없습니다. 새로 시작합니다.")
+            print(f"   checkpoint: {load_checkpoint_path}")
+            print(f"   vecnorm   : {load_vecnorm_path}")
+
+            env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+            model = PPO(
+                "MlpPolicy",
+                env,
+                tensorboard_log="./logs/sb3/lift",
+                device="cuda",
+                **ppo_kwargs,
+            )
     else:
-        if args_cli.resume:
-            print("⚠️  체크포인트가 없어 새로 시작합니다.")
         print("🆕 새 학습 시작")
-        env   = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = PPO(
             "MlpPolicy",
             env,
@@ -192,18 +271,18 @@ def main():
     # 학습
     # ------------------------------------------------------------------
     callback = TrainCallback(
-        total_timesteps = args_cli.timesteps,
-        checkpoint_path = checkpoint_path,
-        vecnorm_path    = vecnorm_path,
-        env_ref         = raw_env,          # ← LiftEnv 직접 전달
-        save_interval   = 500_000,
-        print_interval  = 100_000,
+        total_timesteps=args_cli.timesteps,
+        checkpoint_path=checkpoint_path,
+        vecnorm_path=vecnorm_path,
+        env_ref=raw_env,
+        save_interval=500_000,
+        print_interval=100_000,
     )
 
     model.learn(
-        total_timesteps     = args_cli.timesteps,
-        callback            = callback,
-        reset_num_timesteps = not args_cli.resume,
+        total_timesteps=args_cli.timesteps,
+        callback=callback,
+        reset_num_timesteps=not (args_cli.resume or args_cli.checkpoint is not None),
     )
 
     # ------------------------------------------------------------------
@@ -213,6 +292,7 @@ def main():
         model.save(checkpoint_path)
         env.save(vecnorm_path)
         print(f"✅ 최종 저장 완료: {checkpoint_path}")
+        print(f"✅ VecNormalize 저장 완료: {vecnorm_path}")
 
     env.close()
 

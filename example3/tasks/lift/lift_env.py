@@ -313,6 +313,7 @@ class LiftEnv(DirectRLEnv):
             "xy_dist": xy_dist.mean(),
             "z_dist": z_dist.mean(),
             "gripper_width": gripper_width.mean(),
+            "close_reward": close_reward.mean(),
         }
 
         # self.reward_log["dist_reward"] = float(dist_reward.mean())
@@ -323,6 +324,7 @@ class LiftEnv(DirectRLEnv):
         self.reward_log["grasp_bonus"] = float(grasp_bonus.mean())
         self.reward_log["lift_reward"] = float(lift_reward.mean())
         self.reward_log["success_rate"] = float(success.mean())
+        self.reward_log["close_reward"] = float(close_reward.mean())
         return reward
 
     # ------------------------------------------------------------------

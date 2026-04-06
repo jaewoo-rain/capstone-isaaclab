@@ -139,7 +139,7 @@ class LiftEnvCfg(DirectRLEnvCfg):
     # -------------------------
     action_scale: float = 2.0 # 움직임 속도
     dof_velocity_scale: float = 2.0 # dof_velocity_scale ↓ → 속도 정보 영향 줄임, dof_velocity_scale ↑ → 속도 정보 강조
-    lift_height_threshold: float = 0.12
+    lift_height_threshold: float = 0.5
     success_bonus: float = 10.0
     object_pos_noise: float = 0.05 # 조금 넓게 → 일반화 향상
 

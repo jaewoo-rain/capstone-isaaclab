@@ -188,7 +188,7 @@ class LiftEnv(DirectRLEnv):
         # 3) 접근 진행 보상
         # - 이전 step보다 가까워졌을 때만 보상
         # --------------------------------------------------
-        approach_reward = torch.clamp(self._prev_dist - dist, min=0.0) * 8.0
+        approach_reward = torch.clamp(self._prev_dist - dist, min=0.0)
         self._prev_dist = dist.clone()
 
         # --------------------------------------------------
@@ -217,20 +217,12 @@ class LiftEnv(DirectRLEnv):
         right_to_obj = torch.norm(obj_pos - r_pos, dim=-1)
 
         fingers_near = (left_to_obj < 0.05) & (right_to_obj < 0.05)
-
         side_ok = left_is_left & right_is_right
-
-        # if aligned:
-        #     print("===============================")
-        #     print(f"aligned = ${aligned}")
-        # if fingers_near:
-        #     print("===============================")
-        #     print(f"fingers_near = ${fingers_near}")
 
         pre_grasp_ready = aligned & fingers_near & side_ok
 
         # pre-grasp 정렬 보상
-        # pre_grasp_reward = pre_grasp_ready.float() * 2.0
+        pre_grasp_reward = pre_grasp_ready.float()
 
         # --------------------------------------------------
         # 6) 진짜 grasp 보상
@@ -238,14 +230,13 @@ class LiftEnv(DirectRLEnv):
         # --------------------------------------------------
         closed_enough = gripper_width < 0.055
         is_grasping = pre_grasp_ready & closed_enough
-        grasp_bonus = is_grasping.float() * 4.0
+        grasp_bonus = is_grasping.float()
 
         # 닫는 과정에서 리워드
         # close_reward = pre_grasp_ready.float() * torch.clamp(0.08 - gripper_width, min=0.0) * 10.0
 
-        alignment_score = torch.exp(-40.0 * xy_dist**2) * torch.exp(-60.0 * z_dist**2)
-
-        close_reward = alignment_score * torch.clamp(0.08 - gripper_width, min=0.0) * 20.0
+        alignment_score = torch.exp(-40.0 * xy_dist**2) * torch.exp(-60.0 * z_dist**2) * is_grasping.float()
+        close_reward = alignment_score * torch.clamp(0.08 - gripper_width, min=0.0)
 
 
         # --------------------------------------------------
@@ -261,22 +252,19 @@ class LiftEnv(DirectRLEnv):
         # - "잡은 뒤 들어올림"에 더 의미를 둠
         # --------------------------------------------------
         obj_height = obj_pos[:, 2]
-
-        raw_lift = torch.clamp(obj_height - 0.04, min=0.0)
-        lift_reward = raw_lift * (1.0 + 2.0 * is_grasping.float()) * 12.0
+        lift_reward = torch.clamp(obj_height - 0.02, min=0.0)* is_grasping.float()
 
         # --------------------------------------------------
         # 9) 성공 보너스
         # --------------------------------------------------
         success = (obj_height > self.cfg.lift_height_threshold).float()
-        success_reward = success * self.cfg.success_bonus
-
+        success_reward = success
         # --------------------------------------------------
         # 10) 액션 패널티
         # --------------------------------------------------
         # action_penalty = torch.sum(self.actions**2, dim=-1) * 0.001
         # 집게 빼고 패널티 부여
-        action_penalty = torch.sum(self.actions[:, :7]**2, dim=-1) * 0.001
+        action_penalty = torch.sum(self.actions[:, :7]**2, dim=-1) 
 
 
 
@@ -285,16 +273,16 @@ class LiftEnv(DirectRLEnv):
         # --------------------------------------------------
         reward = (
             # 1.2 * dist_reward
-            + approach_reward
-            # + 1.5 * xy_align_reward
-            # + 1.2 * z_align_reward
-            # + pre_grasp_reward
-            + grasp_bonus
-            + lift_reward
-            + success_reward
-            + close_reward
+            # + 8 * approach_reward
+            # + 0.15 * xy_align_reward
+            # + 0.12 * z_align_reward
+            # + 2.0 * pre_grasp_reward
+            + 10 * close_reward
+            # + 4.0 * grasp_bonus
+            + 30 * lift_reward
+            + 1000 * success_reward
             # - close_penalty
-            - action_penalty
+            - 0.001 * action_penalty
         )
 
         # --------------------------------------------------
@@ -313,6 +301,7 @@ class LiftEnv(DirectRLEnv):
             "xy_dist": xy_dist.mean(),
             "z_dist": z_dist.mean(),
             "gripper_width": gripper_width.mean(),
+            "close_reward": close_reward.mean(),
         }
 
         # self.reward_log["dist_reward"] = float(dist_reward.mean())
@@ -323,6 +312,7 @@ class LiftEnv(DirectRLEnv):
         self.reward_log["grasp_bonus"] = float(grasp_bonus.mean())
         self.reward_log["lift_reward"] = float(lift_reward.mean())
         self.reward_log["success_rate"] = float(success.mean())
+        self.reward_log["close_reward"] = float(close_reward.mean())
         return reward
 
     # ------------------------------------------------------------------

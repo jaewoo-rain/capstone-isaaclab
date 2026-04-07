@@ -8,21 +8,23 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 
 @configclass
 class LiftEnvCfg(DirectRLEnvCfg):
-    """Franka Lift Env 설정"""
+    """OMY Lift Env 설정"""
 
     # -------------------------
     # 1. 기본 env 설정
     # -------------------------
     decimation: int = 2
     episode_length_s: float = 8.0
-    action_space: int = 8       # Arm(7) + Gripper(1, 미러링)
-    # dof_pos(9)+dof_vel(9)+obj_rel(3)+obj_to_grip(3)+gripper_width(1)+to_target_height(1) = 26
-    observation_space: int = 26
+
+    # Arm(6) + Gripper(1)
+    action_space: int = 7
+
+    # 실제 obs dim은 env에서 다시 맞춰서 사용
+    observation_space: int = 22
     state_space: int = 0
 
     # -------------------------
@@ -50,12 +52,13 @@ class LiftEnvCfg(DirectRLEnvCfg):
     )
 
     # -------------------------
-    # 4. 에셋 — 공식 코드와 동일하게 필드명을 'robot', 'object' 로 통일
+    # 4. Robot
     # -------------------------
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/FrankaEmika/panda_instanceable.usd",
+            # 반드시 네 실제 USD 경로로 맞춰줘
+            usd_path="/home/jaewoo/IsaacLab/source/OMY.usd",
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -64,63 +67,70 @@ class LiftEnvCfg(DirectRLEnvCfg):
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=12,
-                solver_velocity_iteration_count=1,
+                solver_velocity_iteration_count=2,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos={
-                "panda_joint1": 0.0,
-                "panda_joint2": -0.785,   # -45 deg
-                "panda_joint3": 0.0,
-                "panda_joint4": -2.356,   # -135 deg
-                "panda_joint5": 0.0,
-                "panda_joint6": 1.571,    # 90 deg
-                "panda_joint7": 0.785,    # 45 deg
-                "panda_finger_joint.*": 0.04,
+                "joint1": 0.0,
+                "joint2": -0.6,
+                "joint3": 0.8,
+                "joint4": 0.0,
+                "joint5": 0.6,
+                "joint6": 0.0,
+                "rh_r1_joint": 0.0,
+                "rh_r2": 0.0,
+                "rh_l1": 0.0,
+                "rh_l2": 0.0,
             },
             pos=(0.0, 0.0, 0.0),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         actuators={
-            "panda_shoulder": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[1-4]"],
-                effort_limit_sim=87.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_forearm": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[5-7]"],
-                effort_limit_sim=12.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_hand": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint.*"],
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=["joint[1-6]"],
                 effort_limit_sim=200.0,
-                stiffness=2e3,
-                damping=1e2,
+                stiffness=80.0,
+                damping=5.0,
+            ),
+            "gripper": ImplicitActuatorCfg(
+                joint_names_expr=["rh_.*"],
+                effort_limit_sim=120.0,
+                stiffness=1200.0,
+                damping=100.0,
             ),
         },
     )
 
+    # -------------------------
+    # 5. Object
+    # -------------------------
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         spawn=sim_utils.CuboidCfg(
-            size=(0.04, 0.04, 0.04),
+            # 가로 11.8cm, 세로 13.9cm, 높이 4.4cm
+            # size=(0.118, 0.139, 0.044),
+            size=(0.05, 0.05, 0.05),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 max_depenetration_velocity=5.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            # 무게 3kg
+            mass_props=sim_utils.MassPropertiesCfg(mass=3.0),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.7, 0.2)),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.2, 0.7, 0.2)
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.5, 0.0, 0.02),
+            # 높이 0.044m -> 바닥 위 중심 z는 0.022
+            pos=(0.20, 0.0, 0.022),
         ),
     )
 
-    # Ground — 공식 코드와 동일하게 TerrainImporterCfg 사용
+    # -------------------------
+    # 6. Ground
+    # -------------------------
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
@@ -135,19 +145,23 @@ class LiftEnvCfg(DirectRLEnvCfg):
     )
 
     # -------------------------
-    # 5. 태스크 파라미터
+    # 7. 태스크 파라미터
     # -------------------------
-    action_scale: float = 2.0 # 움직임 속도
-    dof_velocity_scale: float = 2.0 # dof_velocity_scale ↓ → 속도 정보 영향 줄임, dof_velocity_scale ↑ → 속도 정보 강조
-    lift_height_threshold: float = 0.5
+    action_scale: float = 1.0
+    dof_velocity_scale: float = 1.0
+
+    # OMY가 들기 현실적인 높이
+    lift_height_threshold: float = 0.2
+
     success_bonus: float = 10.0
-    object_pos_noise: float = 0.05 # 조금 넓게 → 일반화 향상
+    object_pos_noise: float = 0.02
+
+    # 카메라 바닥 접근 패널티
+    camera_min_height: float = 0.03
 
     # -------------------------
-    # 6. PPO 학습 파라미터
+    # 8. PPO 학습 파라미터
     # -------------------------
-    # n_steps * num_envs = 512 * 256 = 131072 (총 배치)
-    # batch_size = 4096 → 미니배치 32개 → 충분한 gradient update
     n_steps: int = 512
     batch_size: int = 4096
     learning_rate: float = 3e-4
@@ -156,4 +170,4 @@ class LiftEnvCfg(DirectRLEnvCfg):
     clip_range: float = 0.2
     ent_coef: float = 0.005
     vf_coef: float = 0.5
-    n_epochs: int = 5                  # train.py에서도 PPO에 넘겨줄 것
+    n_epochs: int = 5

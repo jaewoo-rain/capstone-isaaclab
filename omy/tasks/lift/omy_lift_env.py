@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import torch
 
-from .omy_base_env import OmyBaseEnv
-from .omy_env_cfg import OmyLiftEnvCfg
+from source.omy.tasks.common.omy_base_env import OmyBaseEnv
+from source.omy.tasks.common.omy_env_cfg import OmyLiftEnvCfg
 
 
 class OmyLiftEnv(OmyBaseEnv):

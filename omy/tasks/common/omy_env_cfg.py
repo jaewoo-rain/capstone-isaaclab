@@ -30,7 +30,7 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     episode_length_s: float = 8.0
 
     # 실제 잡아야하는곳이 중심으로부터 얼마나 위에 있는가
-    grasp_target_z_offset: float = 0.04
+    grasp_target_z_offset: float = 0.045
 
     # action:
     # arm 6축 + gripper 1축(master: rh_r1_joint 기준)

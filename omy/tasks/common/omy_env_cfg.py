@@ -29,6 +29,9 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     decimation: int = 2
     episode_length_s: float = 8.0
 
+    # 실제 잡아야하는곳이 중심으로부터 얼마나 위에 있는가
+    grasp_target_z_offset: float = 0.04
+
     # action:
     # arm 6축 + gripper 1축(master: rh_r1_joint 기준)
     action_space: int = 7
@@ -37,6 +40,9 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     # dof_pos(10) + dof_vel(10) + obj_pos_rel(3) + obj_to_ee(3) + gripper_joint(1) + to_target(1)
     observation_space: int = 28
     state_space: int = 0
+
+    # 카메라 on/off
+    use_camera: bool = True
 
     # -------------------------
     # 2. 시뮬레이션 설정
@@ -75,20 +81,22 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         spawn=sim_utils.CuboidCfg(
-            size=(0.04, 0.04, 0.04),
+            size=(0.139, 0.044, 0.118),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 disable_gravity=False,
                 max_depenetration_velocity=5.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.3), # 0.3kg
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.2, 0.7, 0.2)
+                diffuse_color=(0.667, 0.686, 0.706), # (R,G,B)색
+                metallic=0.8, # 높을수록 금속 느낌
+                roughness=0.4, # 낮을수록 반짝임
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.45, -0.10, 0.02),
+            pos=(0.45, -0.10, 0.06),
         ),
     )
 
@@ -141,7 +149,7 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     action_scale: float = 2.0
     dof_velocity_scale: float = 1.0
 
-    object_pos_noise: float = 0.05
+    object_pos_noise: float = 0.00 # 나중에 고쳐야함
     lift_height_threshold: float = 0.12
     success_bonus: float = 10.0
 

@@ -17,6 +17,7 @@ from collections.abc import Sequence
 import numpy as np
 import gymnasium as gym
 import torch
+from isaaclab.utils.math import quat_apply
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -104,11 +105,14 @@ class OmyBaseEnv(DirectRLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self._object = RigidObject(self.cfg.object)
-        self._camera = Camera(self.cfg.camera)
 
         self.scene.articulations["robot"] = self._robot
         self.scene.rigid_objects["object"] = self._object
-        self.scene.sensors["camera"] = self._camera
+
+        self._camera = None
+        if self.cfg.use_camera:
+            self._camera = Camera(self.cfg.camera)
+            self.scene.sensors["camera"] = self._camera
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -214,13 +218,20 @@ class OmyBaseEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
 
         # object reset
+        # OmyBaseEnv._reset_idx()
+
         obj_state = self._object.data.default_root_state[env_ids_t].clone()
         noise = (torch.rand((len(env_ids_t), 2), device=self.device) - 0.5) * 2.0 * self.cfg.object_pos_noise
         env_origins = self.scene.env_origins[env_ids_t]
 
-        obj_state[:, 0] = env_origins[:, 0] + 0.45 + noise[:, 0]
-        obj_state[:, 1] = env_origins[:, 1] - 0.10 + noise[:, 1]
-        obj_state[:, 2] = env_origins[:, 2] + 0.02
+        base_x, base_y, base_z = self.cfg.object.init_state.pos
+
+        # obj_state[:, 0] = env_origins[:, 0] + base_x + noise[:, 0]
+        # obj_state[:, 1] = env_origins[:, 1] + base_y + noise[:, 1]
+
+        obj_state[:, 0] = env_origins[:, 0] + base_x
+        obj_state[:, 1] = env_origins[:, 1] + base_y
+        obj_state[:, 2] = env_origins[:, 2] + base_z
         obj_state[:, 7:] = 0.0
 
         self._object.write_root_state_to_sim(obj_state, env_ids=env_ids_t)
@@ -237,7 +248,19 @@ class OmyBaseEnv(DirectRLEnv):
         self.ee_pos_w[env_ids] = self._robot.data.body_pos_w[env_ids, self.ee_body_id, :]
         self.obj_pos_w[env_ids] = self._object.data.root_pos_w[env_ids]
         self.obj_pos_rel[env_ids] = self.obj_pos_w[env_ids] - self.scene.env_origins[env_ids]
-        self.obj_to_ee[env_ids] = self.obj_pos_w[env_ids] - self.ee_pos_w[env_ids]
+
+        # self.obj_to_ee[env_ids] = self.obj_pos_w[env_ids] - self.ee_pos_w[env_ids]
+        obj_pos = self.obj_pos_w[env_ids]
+        obj_quat = self._object.data.root_quat_w[env_ids]
+
+        local_offset = torch.zeros((obj_pos.shape[0], 3), device=self.device)
+        local_offset[:, 2] = self.cfg.grasp_target_z_offset
+
+        world_offset = quat_apply(obj_quat, local_offset)
+        grasp_target_pos = obj_pos + world_offset
+
+        self.obj_to_ee[env_ids] = grasp_target_pos - self.ee_pos_w[env_ids]
+
 
         self.left_finger_pos[env_ids] = self._robot.data.body_pos_w[env_ids, self.left_finger_body_id, :]
         self.right_finger_pos[env_ids] = self._robot.data.body_pos_w[env_ids, self.right_finger_body_id, :]
@@ -263,47 +286,128 @@ class OmyBaseEnv(DirectRLEnv):
         return 0.5 * (self.left_tip_pos + self.right_tip_pos)
 
     def _get_common_terms(self):
+        # 최신 상태 (EE, object, finger 위치 등) 갱신
         self._compute_intermediate_values()
 
-        obj_pos = self.obj_pos_w
-        ee_pos = self.ee_pos_w
+        # -------------------------
+        # 1. 기본 위치 정보
+        # -------------------------
+        obj_pos = self.obj_pos_w        # 물체의 월드 좌표 (x, y, z)
+        ee_pos = self.ee_pos_w          # 로봇 end-effector 위치
 
-        finger_center = self._get_finger_center()
-        tip_center = self._get_tip_center()
+        # 잡아야할 실제 위치
+        # grasp_target_pos = obj_pos.clone()
+        # grasp_target_pos[:, 2] += self.cfg.grasp_target_z_offset
 
-        gripper_joint = self._get_gripper_joint()
+        obj_quat = self._object.data.root_quat_w
 
-        obj_to_ee = obj_pos - ee_pos
-        dist = torch.norm(obj_to_ee, dim=-1)
+        local_offset = torch.zeros((obj_pos.shape[0], 3), device=self.device)
+        local_offset[:, 2] = self.cfg.grasp_target_z_offset
 
-        obj_to_tip = obj_pos - tip_center
-        xy_dist = torch.norm(obj_to_tip[:, :2], dim=-1)
-        z_dist = torch.abs(obj_to_tip[:, 2])
+        world_offset = quat_apply(obj_quat, local_offset)
+        grasp_target_pos = obj_pos + world_offset
 
+        # -------------------------
+        # 2. 그리퍼 중심 / 끝 위치
+        # -------------------------
+        finger_center = self._get_finger_center()   # 손가락 두 개의 중간 지점
+        tip_center = self._get_tip_center()         # 손가락 끝(tip) 기준 중심
+
+        # -------------------------
+        # 3. 그리퍼 상태
+        # -------------------------
+        gripper_joint = self._get_gripper_joint()   # gripper 열림/닫힘 정도 (joint 값)
+
+        # -------------------------
+        # 4. EE ↔ Object 거리
+        # -------------------------
+        # obj_to_ee = obj_pos - ee_pos                # 벡터 (EE → object)
+        # dist = torch.norm(obj_to_ee, dim=-1)        # 거리 (L2 norm)
+
+        target_to_ee = grasp_target_pos - ee_pos
+        dist = torch.norm(target_to_ee, dim=-1)
+
+        # 잡을 위치 기준 재정의
+        target_to_tip = grasp_target_pos - tip_center
+        xy_dist = torch.norm(target_to_tip[:, :2], dim=-1)
+        z_dist = torch.abs(target_to_tip[:, 2])
+
+        # # -------------------------
+        # # 5. Tip 기준 정렬 거리
+        # # -------------------------
+        # obj_to_tip = obj_pos - tip_center           # tip 중심 기준으로 물체 위치
+            
+        # xy_dist = torch.norm(obj_to_tip[:, :2], dim=-1)   # XY 평면 거리
+        # z_dist = torch.abs(obj_to_tip[:, 2])              # 높이 차이
+
+        # -------------------------
+        # 6. 접근 보상 (progress 기반)
+        # -------------------------
+        # 이전 step보다 가까워졌으면 +reward
         approach_reward = torch.clamp(self._prev_dist - dist, min=0.0)
+
+        # 현재 거리 저장 (다음 step에서 비교용)
         self._prev_dist = dist.clone()
 
+        # -------------------------
+        # 7. 정렬 보상 (continuous)
+        # -------------------------
+        # 거리가 가까울수록 1에 가까워지는 exp 함수
         xy_align_reward = torch.exp(-40.0 * xy_dist**2)
         z_align_reward = torch.exp(-60.0 * z_dist**2)
 
-        xy_aligned = xy_dist < 0.05
-        z_aligned = z_dist < 0.05
-        aligned = xy_aligned & z_aligned
+        # -------------------------
+        # 8. 정렬 조건 (binary)
+        # -------------------------
+        xy_aligned = xy_dist < 0.05     # XY 기준 충분히 가까움
+        z_aligned = z_dist < 0.05       # Z 기준 충분히 가까움
+
+        aligned = xy_aligned & z_aligned   # 둘 다 만족해야 정렬 완료
+
+        # -------------------------
+        # 9. 손가락 위치 관계 체크
+        # -------------------------
+        # 물체 기준으로 왼쪽/오른쪽에 finger가 있는지 확인
 
         left_is_left = self.left_tip_pos[:, 1] < obj_pos[:, 1]
         right_is_right = self.right_tip_pos[:, 1] > obj_pos[:, 1]
 
+        # 👉 의미:
+        # 물체 기준 Y축으로
+        # 왼손은 왼쪽, 오른손은 오른쪽에 있어야 제대로 잡는 구조
+
+        # -------------------------
+        # 10. finger ↔ object 거리
+        # -------------------------
         left_to_obj = torch.norm(obj_pos - self.left_tip_pos, dim=-1)
         right_to_obj = torch.norm(obj_pos - self.right_tip_pos, dim=-1)
 
+        # 양쪽 finger가 모두 물체 근처에 있어야 함
         fingers_near = (left_to_obj < 0.05) & (right_to_obj < 0.05)
+
+        # 좌우 위치 조건까지 만족해야 함
         side_ok = left_is_left & right_is_right
 
+        # -------------------------
+        # 11. pre-grasp 상태 정의
+        # -------------------------
+        # "잡기 직전 상태"
+        # 조건:
+        # - 정렬됨
+        # - 손가락 둘 다 근처
+        # - 좌우 위치 올바름
         pre_grasp_ready = aligned & fingers_near & side_ok
 
-        # gripper master joint가 커질수록 닫히는 방향이라고 가정
-        # 조정 : 바꿔야함
+        # -------------------------
+        # 12. 그리퍼 닫힘 조건
+        # -------------------------
+        # joint 값이 클수록 닫힌 상태라고 가정
         closed_enough = gripper_joint > 0.3
+
+        # -------------------------
+        # 13. grasp 판정
+        # -------------------------
+        # 잡았다 = pre-grasp 상태 + 그리퍼 닫힘
         is_grasping = pre_grasp_ready & closed_enough
 
         return {
@@ -320,9 +424,12 @@ class OmyBaseEnv(DirectRLEnv):
             "z_align_reward": z_align_reward,
             "pre_grasp_ready": pre_grasp_ready,
             "is_grasping": is_grasping,
+            "aligned": aligned,
         }
 
     def _get_camera_rgb(self) -> torch.Tensor | None:
+        if self._camera is None:
+            return None
         if "rgb" in self._camera.data.output:
             return self._camera.data.output["rgb"]
         return None
@@ -330,9 +437,25 @@ class OmyBaseEnv(DirectRLEnv):
     # ------------------------------------------------------------------
     # dones
     # ------------------------------------------------------------------
+    # def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+    #     obj_height = self.obj_pos_w[:, 2]
+    #     terminated = (obj_height > self.cfg.lift_height_threshold) | (obj_height < -0.1)
+    #     truncated = self.episode_length_buf >= self.max_episode_length - 1
+    #     return terminated, truncated
+    # 잡기 전용
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        t = self._get_common_terms()
         obj_height = self.obj_pos_w[:, 2]
-        terminated = (obj_height > self.cfg.lift_height_threshold) | (obj_height < -0.1)
+
+        obj_quat = self._object.data.root_quat_w
+        local_up = torch.zeros((obj_quat.shape[0], 3), device=self.device)
+        local_up[:, 2] = 1.0
+
+        world_up_from_obj = quat_apply(obj_quat, local_up)
+        upright_score = world_up_from_obj[:, 2]
+        fallen = upright_score < 0.3
+
+        terminated = t["is_grasping"] | fallen |(obj_height < -0.1)
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 

@@ -30,7 +30,7 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     episode_length_s: float = 8.0
 
     # 실제 잡아야하는곳이 중심으로부터 얼마나 위에 있는가
-    grasp_target_z_offset: float = 0.045
+    grasp_target_z_offset: float = 0.04
 
     # action:
     # arm 6축 + gripper 1축(master: rh_r1_joint 기준)
@@ -42,7 +42,7 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     state_space: int = 0
 
     # 카메라 on/off
-    use_camera: bool = True
+    use_camera: bool = False
 
     # -------------------------
     # 2. 시뮬레이션 설정
@@ -63,7 +63,7 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     # 3. Scene 설정
     # -------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=128,
+        num_envs=32,
         env_spacing=2.5,
         replicate_physics=True,
     )
@@ -105,27 +105,27 @@ class OmyLiftEnvCfg(DirectRLEnvCfg):
     # 실제 probe 결과상 USD 안에는 camera prim이 없었으므로
     # end_effector_flange_link 아래에 새로 붙임
     # -------------------------
-    camera: CameraCfg = CameraCfg(
-        prim_path="/World/envs/env_.*/Robot/OMY/link6/camera",
-        update_period=0.0,
-        # height=240,
-        # width=320,
-        # 화질 줄임
-        height=84,
-        width=84,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.01, 10.0),
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.0, -0.1, 0.084),
-            rot=(0.0, 0.0, 0.7, -0.7),
-            convention="ros",
-        ),
-    )
+    # camera: CameraCfg = CameraCfg(
+    #     prim_path="/World/envs/env_.*/Robot/OMY/link6/camera",
+    #     update_period=0.0,
+    #     # height=240,
+    #     # width=320,
+    #     # 화질 줄임
+    #     height=84,
+    #     width=84,
+    #     data_types=["rgb"],
+    #     spawn=sim_utils.PinholeCameraCfg(
+    #         focal_length=24.0,
+    #         focus_distance=400.0,
+    #         horizontal_aperture=20.955,
+    #         clipping_range=(0.01, 10.0),
+    #     ),
+    #     offset=CameraCfg.OffsetCfg(
+    #         pos=(0.0, -0.1, 0.084),
+    #         rot=(0.0, 0.0, 0.7, -0.7),
+    #         convention="ros",
+    #     ),
+    # )
 
     # -------------------------
     # 7. 바닥

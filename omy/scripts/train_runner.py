@@ -75,7 +75,7 @@ def build_train_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true", help="기본 체크포인트에서 이어 학습")
     parser.add_argument("--checkpoint", type=str, default=None, help="불러올 체크포인트 경로(.zip)")
     parser.add_argument("--timesteps", type=int, default=5_000_000, help="이번 실행에서 추가 학습할 timesteps")
-    parser.add_argument("--num_envs", type=int, default=64, help="병렬 env 개수")
+    parser.add_argument("--num_envs", type=int, default=16, help="병렬 env 개수")
     parser.add_argument("--disable_camera", action="store_true", help="카메라 센서를 생성하지 않음")
     parser.add_argument("--save_path", type=str, default=None, help="저장 경로 prefix (.zip 제외 권장)")
     parser.add_argument("--log_dir", type=str, default=None, help="tensorboard 로그 경로")
@@ -193,7 +193,7 @@ def run_ppo_train(
         reset_num_timesteps = True
 
     print("[INFO] 학습 시작")
-    callback = StepLoggerCallback(base_env=base_env, log_freq=100000)
+    callback = StepLoggerCallback(base_env=base_env, log_freq=10000)
 
     model.learn(
         total_timesteps=args_cli.timesteps,

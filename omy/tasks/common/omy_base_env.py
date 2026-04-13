@@ -109,10 +109,10 @@ class OmyBaseEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self.scene.rigid_objects["object"] = self._object
 
-        self._camera = None
-        if self.cfg.use_camera:
-            self._camera = Camera(self.cfg.camera)
-            self.scene.sensors["camera"] = self._camera
+        # self._camera = None
+        # if self.cfg.use_camera:
+        #     self._camera = Camera(self.cfg.camera)
+        #     self.scene.sensors["camera"] = self._camera
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -199,6 +199,44 @@ class OmyBaseEnv(DirectRLEnv):
     # ------------------------------------------------------------------
     # reset
     # ------------------------------------------------------------------
+    # def _reset_idx(self, env_ids: Sequence[int] | None):
+    #     if env_ids is None:
+    #         env_ids = self._robot._ALL_INDICES
+
+    #     super()._reset_idx(env_ids)
+    #     env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+
+    #     self._prev_dist[env_ids_t] = 0.0
+
+    #     # default joint pose
+    #     joint_pos = self._robot.data.default_joint_pos[env_ids_t].clone()
+    #     joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+    #     joint_vel = torch.zeros_like(joint_pos)
+
+    #     self.robot_dof_targets[env_ids_t] = joint_pos
+    #     self._robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
+    #     self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
+
+    #     # object reset
+    #     # OmyBaseEnv._reset_idx()
+
+    #     obj_state = self._object.data.default_root_state[env_ids_t].clone()
+    #     noise = (torch.rand((len(env_ids_t), 2), device=self.device) - 0.5) * 2.0 * self.cfg.object_pos_noise
+    #     env_origins = self.scene.env_origins[env_ids_t]
+
+    #     base_x, base_y, base_z = self.cfg.object.init_state.pos
+
+    #     # obj_state[:, 0] = env_origins[:, 0] + base_x + noise[:, 0]
+    #     # obj_state[:, 1] = env_origins[:, 1] + base_y + noise[:, 1]
+
+    #     obj_state[:, 0] = env_origins[:, 0] + base_x
+    #     obj_state[:, 1] = env_origins[:, 1] + base_y
+    #     obj_state[:, 2] = env_origins[:, 2] + base_z
+    #     obj_state[:, 7:] = 0.0
+
+    #     self._object.write_root_state_to_sim(obj_state, env_ids=env_ids_t)
+
+    #     self._compute_intermediate_values(env_ids_t)
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
@@ -208,26 +246,18 @@ class OmyBaseEnv(DirectRLEnv):
 
         self._prev_dist[env_ids_t] = 0.0
 
-        # default joint pose
+        # 1. 기본 로봇 reset
         joint_pos = self._robot.data.default_joint_pos[env_ids_t].clone()
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         joint_vel = torch.zeros_like(joint_pos)
 
         self.robot_dof_targets[env_ids_t] = joint_pos
-        self._robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
 
-        # object reset
-        # OmyBaseEnv._reset_idx()
-
+        # 2. 기본 물체 reset
         obj_state = self._object.data.default_root_state[env_ids_t].clone()
-        noise = (torch.rand((len(env_ids_t), 2), device=self.device) - 0.5) * 2.0 * self.cfg.object_pos_noise
         env_origins = self.scene.env_origins[env_ids_t]
-
         base_x, base_y, base_z = self.cfg.object.init_state.pos
-
-        # obj_state[:, 0] = env_origins[:, 0] + base_x + noise[:, 0]
-        # obj_state[:, 1] = env_origins[:, 1] + base_y + noise[:, 1]
 
         obj_state[:, 0] = env_origins[:, 0] + base_x
         obj_state[:, 1] = env_origins[:, 1] + base_y
@@ -236,8 +266,13 @@ class OmyBaseEnv(DirectRLEnv):
 
         self._object.write_root_state_to_sim(obj_state, env_ids=env_ids_t)
 
+        # 3. task별 reset 덮어쓰기
+        self._task_specific_reset(env_ids_t)
+
         self._compute_intermediate_values(env_ids_t)
 
+    def _task_specific_reset(self, env_ids: torch.Tensor) -> None:
+        pass
     # ------------------------------------------------------------------
     # helper
     # ------------------------------------------------------------------
@@ -295,10 +330,6 @@ class OmyBaseEnv(DirectRLEnv):
         obj_pos = self.obj_pos_w        # 물체의 월드 좌표 (x, y, z)
         ee_pos = self.ee_pos_w          # 로봇 end-effector 위치
 
-        # 잡아야할 실제 위치
-        # grasp_target_pos = obj_pos.clone()
-        # grasp_target_pos[:, 2] += self.cfg.grasp_target_z_offset
-
         obj_quat = self._object.data.root_quat_w
 
         local_offset = torch.zeros((obj_pos.shape[0], 3), device=self.device)
@@ -318,27 +349,23 @@ class OmyBaseEnv(DirectRLEnv):
         # -------------------------
         gripper_joint = self._get_gripper_joint()   # gripper 열림/닫힘 정도 (joint 값)
 
+        # if torch.rand(1).item() < 0.001:  # 그리퍼 얼마나 닫히는지 체크
+        #     print("gripper range:", gripper_joint.min().item(), gripper_joint.max().item())
+
         # -------------------------
         # 4. EE ↔ Object 거리
         # -------------------------
-        # obj_to_ee = obj_pos - ee_pos                # 벡터 (EE → object)
-        # dist = torch.norm(obj_to_ee, dim=-1)        # 거리 (L2 norm)
-
         target_to_ee = grasp_target_pos - ee_pos
         dist = torch.norm(target_to_ee, dim=-1)
 
-        # 잡을 위치 기준 재정의
-        target_to_tip = grasp_target_pos - tip_center
-        xy_dist = torch.norm(target_to_tip[:, :2], dim=-1)
-        z_dist = torch.abs(target_to_tip[:, 2])
 
         # # -------------------------
         # # 5. Tip 기준 정렬 거리
         # # -------------------------
-        # obj_to_tip = obj_pos - tip_center           # tip 중심 기준으로 물체 위치
-            
-        # xy_dist = torch.norm(obj_to_tip[:, :2], dim=-1)   # XY 평면 거리
-        # z_dist = torch.abs(obj_to_tip[:, 2])              # 높이 차이
+        # 잡을 위치 기준 재정의
+        target_to_tip = grasp_target_pos - tip_center
+        xy_dist = torch.norm(target_to_tip[:, :2], dim=-1)
+        z_dist = torch.abs(target_to_tip[:, 2])
 
         # -------------------------
         # 6. 접근 보상 (progress 기반)
@@ -353,14 +380,14 @@ class OmyBaseEnv(DirectRLEnv):
         # 7. 정렬 보상 (continuous)
         # -------------------------
         # 거리가 가까울수록 1에 가까워지는 exp 함수
-        xy_align_reward = torch.exp(-40.0 * xy_dist**2)
+        xy_align_reward = torch.exp(-60.0 * xy_dist**2)
         z_align_reward = torch.exp(-60.0 * z_dist**2)
 
         # -------------------------
         # 8. 정렬 조건 (binary)
         # -------------------------
         xy_aligned = xy_dist < 0.05     # XY 기준 충분히 가까움
-        z_aligned = z_dist < 0.05       # Z 기준 충분히 가까움
+        z_aligned = z_dist < 0.08       # Z 기준 충분히 가까움
 
         aligned = xy_aligned & z_aligned   # 둘 다 만족해야 정렬 완료
 
@@ -396,13 +423,15 @@ class OmyBaseEnv(DirectRLEnv):
         # - 정렬됨
         # - 손가락 둘 다 근처
         # - 좌우 위치 올바름
-        pre_grasp_ready = aligned & fingers_near & side_ok
+        pre_grasp_ready = aligned & side_ok
 
         # -------------------------
         # 12. 그리퍼 닫힘 조건
         # -------------------------
         # joint 값이 클수록 닫힌 상태라고 가정
         closed_enough = gripper_joint > 0.3
+        closed_enough = (left_to_obj < 0.05) & (right_to_obj < 0.05)
+
 
         # -------------------------
         # 13. grasp 판정
@@ -427,12 +456,12 @@ class OmyBaseEnv(DirectRLEnv):
             "aligned": aligned,
         }
 
-    def _get_camera_rgb(self) -> torch.Tensor | None:
-        if self._camera is None:
-            return None
-        if "rgb" in self._camera.data.output:
-            return self._camera.data.output["rgb"]
-        return None
+    # def _get_camera_rgb(self) -> torch.Tensor | None:
+    #     if self._camera is None:
+    #         return None
+    #     if "rgb" in self._camera.data.output:
+    #         return self._camera.data.output["rgb"]
+    #     return None
 
     # ------------------------------------------------------------------
     # dones

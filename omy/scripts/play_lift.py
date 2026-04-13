@@ -17,8 +17,8 @@ simulation_app = app_launcher.app
 from stable_baselines3 import PPO
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper
 
-from source.omy.omy_env_cfg import OmyLiftEnvCfg
-from source.omy.omy_lift_env import OmyLiftEnv
+from source.omy.tasks.common.omy_env_cfg import OmyLiftEnvCfg
+from source.omy.tasks.lift.omy_lift_env import OmyLiftEnv
 
 
 def main():

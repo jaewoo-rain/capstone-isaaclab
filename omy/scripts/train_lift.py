@@ -1,64 +1,13 @@
-from __future__ import annotations
-
-import argparse
-import os
-import sys
-
-from isaaclab.app import AppLauncher
-
-parser = argparse.ArgumentParser(description="Train OMY lift PPO")
-AppLauncher.add_app_launcher_args(parser)
-args_cli, hydra_args = parser.parse_known_args()
-sys.argv = [sys.argv[0]] + hydra_args
-
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
-
-from stable_baselines3 import PPO
-from isaaclab_rl.sb3 import Sb3VecEnvWrapper   # 추가
-
-from source.omy.omy_env_cfg import OmyLiftEnvCfg
-from source.omy.omy_lift_env import OmyLiftEnv
-
-
-def main():
-    cfg = OmyLiftEnvCfg()
-
-    # 처음엔 작게
-    cfg.scene.num_envs = 16
-    cfg.n_steps = 256
-    cfg.batch_size = 1024
-
-    base_env = OmyLiftEnv(cfg, render_mode=None)
-
-    # Isaac Lab env -> SB3 VecEnv로 감싸기
-    env = Sb3VecEnvWrapper(base_env)
-
-    model = PPO(
-        "MlpPolicy",
-        env,
-        n_steps=cfg.n_steps,
-        batch_size=cfg.batch_size,
-        learning_rate=cfg.learning_rate,
-        gamma=cfg.gamma,
-        gae_lambda=cfg.gae_lambda,
-        clip_range=cfg.clip_range,
-        ent_coef=cfg.ent_coef,
-        vf_coef=cfg.vf_coef,
-        n_epochs=cfg.n_epochs,
-        verbose=1,
-        tensorboard_log="./logs/omy_lift/",
-        device="cpu",
-    )
-
-    model.learn(total_timesteps=50_000)
-
-    os.makedirs("checkpoints", exist_ok=True)
-    model.save("checkpoints/omy_lift_ppo")
-
-    env.close()
-    simulation_app.close()
+from source.omy.scripts.train_runner import run_ppo_train
 
 
 if __name__ == "__main__":
-    main()
+    run_ppo_train(
+        env_cls_path="source.omy.tasks.lift.omy_lift_env.OmyLiftEnv",
+        cfg_cls_path="source.omy.tasks.common.omy_env_cfg.OmyLiftEnvCfg",
+        description="Train OMY lift PPO",
+        default_save_path="checkpoints/omy_lift_ppo",
+        default_resume_path="checkpoints/omy_lift_ppo.zip",
+        default_log_dir="./logs/omy_lift/",
+    )
+

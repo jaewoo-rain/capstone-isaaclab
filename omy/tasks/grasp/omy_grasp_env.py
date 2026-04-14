@@ -46,10 +46,10 @@ class OmyGraspEnv(OmyBaseEnv):
         approach_reward = t["approach_reward"]
         is_grasping = t["is_grasping"]
         aligned = t["aligned"]
+        xy_align_reward = t["xy_align_reward"]
+        z_align_reward = t["z_align_reward"]
 
         grasp_bonus = is_grasping.float() * 4.0
-        xy_align_reward = torch.exp(-60.0 * xy_dist**2)
-        z_align_reward = torch.exp(-60.0 * z_dist**2) * xy_align_reward
 
         close_amount = torch.clamp(gripper_joint, min=0.0)
         close_reward = close_amount * aligned
@@ -65,9 +65,9 @@ class OmyGraspEnv(OmyBaseEnv):
         action_penalty = torch.sum(arm_actions**2, dim=-1) * 0.001
 
         reward = (
-            0.3 * approach_reward
-            + 0.8 * xy_align_reward
-            + 0.3 * z_align_reward
+            # 0.3 * approach_reward
+            + 2.0 * xy_align_reward
+            + 1.2 * z_align_reward
             + 4.0 * close_reward
             + 8.0 * grasp_bonus
             - action_penalty

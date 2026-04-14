@@ -8,6 +8,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
+from source.omy.omy_robot_cfg import OMY_CFG
 
 
 @configclass
@@ -54,52 +55,8 @@ class LiftEnvCfg(DirectRLEnvCfg):
     # -------------------------
     # 4. Robot
     # -------------------------
-    robot: ArticulationCfg = ArticulationCfg(
+    robot = OMY_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            # 반드시 네 실제 USD 경로로 맞춰줘
-            usd_path="/home/jaewoo/IsaacLab/source/OMY.usd",
-            activate_contact_sensors=False,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_depenetration_velocity=5.0,
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                solver_position_iteration_count=12,
-                solver_velocity_iteration_count=2,
-            ),
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos={
-                "joint1": 0.0,
-                "joint2": -0.6,
-                "joint3": 0.8,
-                "joint4": 0.0,
-                "joint5": 0.6,
-                "joint6": 0.0,
-                "rh_r1_joint": 0.0,
-                "rh_r2": 0.0,
-                "rh_l1": 0.0,
-                "rh_l2": 0.0,
-            },
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-        actuators={
-            "arm": ImplicitActuatorCfg(
-                joint_names_expr=["joint[1-6]"],
-                effort_limit_sim=200.0,
-                stiffness=80.0,
-                damping=5.0,
-            ),
-            "gripper": ImplicitActuatorCfg(
-                joint_names_expr=["rh_.*"],
-                effort_limit_sim=120.0,
-                stiffness=1200.0,
-                damping=100.0,
-            ),
-        },
     )
 
     # -------------------------
@@ -108,23 +65,22 @@ class LiftEnvCfg(DirectRLEnvCfg):
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         spawn=sim_utils.CuboidCfg(
-            # 가로 11.8cm, 세로 13.9cm, 높이 4.4cm
-            # size=(0.118, 0.139, 0.044),
-            size=(0.05, 0.05, 0.05),
+            size=(0.139, 0.044, 0.118),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
+                disable_gravity=False,
                 max_depenetration_velocity=5.0,
             ),
-            # 무게 3kg
-            mass_props=sim_utils.MassPropertiesCfg(mass=3.0),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.3), # 0.3kg
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.2, 0.7, 0.2)
+                diffuse_color=(0.667, 0.686, 0.706), # (R,G,B)색
+                metallic=0.8, # 높을수록 금속 느낌
+                roughness=0.4, # 낮을수록 반짝임
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            # 높이 0.044m -> 바닥 위 중심 z는 0.022
-            pos=(0.20, 0.0, 0.022),
+            pos=(0.45, -0.10, 0.06),
         ),
     )
 

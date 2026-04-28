@@ -1,0 +1,24 @@
+{
+  "status": "GOAL_ACHIEVED",
+  "best_success_rate": 0.524,
+  "best_iteration": 60,
+  "iteration": 61,
+  "stage": 1,
+  "grid": "1x1",
+  "total_training_steps_approx": 24000000,
+  "key_findings": [
+    "Bug fix critical: out_of_bounds margin 0.3 was killing episodes immediately (ep_len=6)",
+    "After fix (margin=0.6), ep_len 6 -> 32, normal episodes restored",
+    "Increasing success_hold_steps 10 -> 50 dramatically improved success rate (0.21 -> 0.52)",
+    "Reason: with hold=10, episodes terminated quickly on success, restarting from non-success state. With hold=50, success state sustained longer → metric reflects actual success better"
+  ],
+  "validated_settings": {
+    "grid_num_x": 1,
+    "grid_num_y": 1,
+    "stage1_xy_tolerance": 0.10,
+    "success_hold_steps": 50,
+    "out_of_bounds_margin": 0.6,
+    "hover_z_requirement": "removed"
+  },
+  "result": "stage1_success > 0.5 confirmed at iter 60 (0.524). Ready for stage 2 transition or grid expansion to 2x2/3x3."
+}

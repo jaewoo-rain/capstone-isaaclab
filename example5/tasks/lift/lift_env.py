@@ -605,8 +605,8 @@ class LiftEnv(DirectRLEnv):
             + 0.5 * horizontal_reward         # 두 손가락 수평 유지
             + 20.0 * close_reward             # 정렬 상태에서 손가락 접근
             + 30.0 * grasp_close_reward       # 물체 근처일 때 그리퍼 닫기 보상
-            + 500.0 * lift_reward             # 물체 들어올린 높이 (100→500, 압도적 신호로)
-            # + 1000.0 * success_reward       # 성공 보너스 (현재 비활성화)
+            + 50.0 * lift_reward             # 물체 들어올린 높이 (100→500, 압도적 신호로)
+            + 10000.0 * success_reward       # 성공 보너스 (현재 비활성화)
             - 5.0 * premature_close_penalty   # 물체 근처 아닐 때 그리퍼 닫기 패널티
             - 0.001 * action_penalty          # 큰 action 패널티
         )
@@ -628,6 +628,8 @@ class LiftEnv(DirectRLEnv):
         self.reward_log["premature_close"] = float(premature_close_penalty.mean())
         self.reward_log["grasp_close_reward"] = float(grasp_close_reward.mean())
         self.reward_log["near_object"] = float(near_object.mean())
+        self.reward_log["success_reward"] = float(success_reward.mean())
+
 
         return reward
 

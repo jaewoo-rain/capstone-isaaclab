@@ -381,7 +381,7 @@ class OmyBaseEnv(DirectRLEnv):
         # -------------------------
         # 거리가 가까울수록 1에 가까워지는 exp 함수
         xy_align_reward = torch.exp(-60.0 * xy_dist**2)
-        z_align_reward = torch.exp(-60.0 * z_dist**2)
+        z_align_reward = torch.exp(-60.0 * z_dist**2) * xy_align_reward
 
         # -------------------------
         # 8. 정렬 조건 (binary)

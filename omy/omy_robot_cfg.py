@@ -74,14 +74,14 @@ OMY_CFG = ArticulationCfg(
         ),
 
         # 그리퍼 4개 관절 통일
-        # 원래 300이었는데 tip이 물체에 밀리는 문제 → 500으로 올림
-        # base/tip 스티프니스 차이가 크면 따로 노는 것처럼 보임 → 동일하게 유지
+        # USD mimic 깨짐 → write_joint_state_to_sim으로 매 step 강제 동기화 (lift_env._apply_action)
+        # PD는 일반 강도로 복귀 (직접 동기화가 메인이므로 stiffness 폭증 불필요)
         "gripper": ImplicitActuatorCfg(
             joint_names_expr=["rh_r1_joint", "rh_r2", "rh_l1", "rh_l2"],
             velocity_limit_sim=2.2,
-            effort_limit_sim=150.0,
-            stiffness=500.0,
-            damping=30.0,
+            effort_limit_sim=400.0,
+            stiffness=1500.0,
+            damping=60.0,
         ),
     },
 )

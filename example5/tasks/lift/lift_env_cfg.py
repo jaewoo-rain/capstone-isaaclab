@@ -184,7 +184,7 @@ class LiftEnvCfg(DirectRLEnvCfg):
     dof_velocity_scale: float = 1.0
 
     # 물체 높이가 이 값(0.2m = 20cm)을 넘으면 lift 성공으로 판정
-    lift_height_threshold: float = 0.2
+    lift_height_threshold: float = 0.2  # 정책이 이 값 기준 학습됨 (obs to_lift_target 일관성)
 
     # 성공 시 추가 보상 (현재 reward 함수에서 직접 사용되진 않음)
     success_bonus: float = 10.0

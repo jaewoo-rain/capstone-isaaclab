@@ -97,7 +97,6 @@ class PlaceEnv(DirectRLEnv):
         # _get_rewards에서 계산한 플래그를 _get_dones에서 재사용 (초기값은 False)
         self._last_success_now = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._last_tilted = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-        self._last_abandoned = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
         # ----- Handoff 데이터셋 로드 -----
         # collect_handoff.py로 example5에서 수집한 상태들
@@ -330,26 +329,44 @@ class PlaceEnv(DirectRLEnv):
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
     # ------------------------------------------------------------------
-    # Rewards (sparse + shaping)
-    # HER은 sparse를 기본으로 쓰지만, 학습 안정성을 위해 shaping 살짝 섞음
-    # compute_reward는 HER relabeling용으로 VecWrapper에서 따로 호출
+    # Rewards — 통합 3-phase (이동 → 정렬 → 삽입)
+    # phase 전환은 게이팅(gating)으로 자동: 정렬 reward는 near_cell일 때,
+    # 하강 reward는 정렬 완료(aligned)일 때만 활성화.
+    # 떨어뜨림(grip 이탈/낙하) 자체에는 패널티 없음 — 넘어지면(_get_dones의 tilted) reset.
     # ------------------------------------------------------------------
     def _get_rewards(self) -> torch.Tensor:
         self._compute_intermediate_values()
 
         obj_pos_w = self._object.data.root_pos_w
+        obj_quat = self._object.data.root_quat_w
         target_pos_w = self.target_cell_pos_w
         env_origins = self.scene.env_origins
 
-        # --- 핵심 거리 ---
+        # --- 거리 (중심-중심) ---
         xy_dist = torch.norm(obj_pos_w[:, :2] - target_pos_w[:, :2], dim=-1)
         z_dist = torch.abs(obj_pos_w[:, 2] - target_pos_w[:, 2])
         in_cell_xy = xy_dist < self.cfg.cell_tolerance
 
-        # 그리퍼↔물체 거리
-        grip_to_obj_dist = torch.norm(self.grip_center_pos - obj_pos_w, dim=-1)
+        # --- 끝점 매칭 (yaw 정렬 척도) ---
+        # 박스 local +x 방향(길이축) 끝점을 카메라 반대편 끝점으로 정의.
+        # object_endpoint_sign으로 ±x 끝 선택 가능.
+        half_length = float(self.cfg.object.spawn.size[0]) / 2.0
+        local_x = torch.zeros((self.num_envs, 3), device=self.device)
+        local_x[:, 0] = self.cfg.object_endpoint_sign
+        world_x_dir = quat_apply(obj_quat, local_x)
+        obj_endpoint_w = obj_pos_w + half_length * world_x_dir
 
-        # --- 속도 / gripper 상태 ---
+        half_cell_x = self.cfg.cell_inner_x / 2.0
+        cell_endpoint_offset = torch.zeros((1, 3), device=self.device)
+        cell_endpoint_offset[0, 0] = self.cfg.cell_endpoint_sign * half_cell_x
+        cell_endpoint_w = target_pos_w + cell_endpoint_offset
+
+        endpoint_xy_dist = torch.norm(
+            obj_endpoint_w[:, :2] - cell_endpoint_w[:, :2], dim=-1
+        )
+
+        # --- 그리퍼/속도/자세 ---
+        grip_to_obj_dist = torch.norm(self.grip_center_pos - obj_pos_w, dim=-1)
         obj_vel = torch.norm(self._object.data.root_lin_vel_w, dim=-1)
         stable = obj_vel < self.cfg.stable_vel_threshold
 
@@ -359,104 +376,76 @@ class PlaceEnv(DirectRLEnv):
         gripper_close_state = (grip_pos - g_lower) / (g_upper - g_lower + 1e-8)
         gripper_open = gripper_close_state < self.cfg.gripper_open_threshold
 
-        # --- 기울기 (upright_score) ---
-        obj_quat = self._object.data.root_quat_w
         local_up = torch.zeros((obj_quat.shape[0], 3), device=self.device)
         local_up[:, 2] = 1.0
         world_up_from_obj = quat_apply(obj_quat, local_up)
         upright_score = world_up_from_obj[:, 2]
         tilted = upright_score < self.cfg.tilt_upright_threshold
 
-        # --- 바닥 / 버려짐 ---
-        on_floor = obj_pos_w[:, 2] < self.cfg.on_floor_z_threshold
-        abandoned = grip_to_obj_dist > self.cfg.abandoned_dist_threshold
+        # --- Phase 게이트 ---
+        near_cell = xy_dist < self.cfg.near_cell_threshold
+        centered = xy_dist < self.cfg.cell_tolerance
+        endpoint_matched = endpoint_xy_dist < self.cfg.alignment_tolerance
+        aligned = centered & endpoint_matched
+        descended = z_dist < 0.05
+        should_open = aligned & descended
+        success = aligned & descended & stable & gripper_open
 
-        # --- Stage에 따라 success / reward 분기 ---
-        stage = self.cfg.curriculum_stage
+        # --- Phase 1: 이동 (move) — 항상 활성 ---
+        move_wide = torch.exp(-5.0 * xy_dist**2)         # 멀리서도 gradient
+        move_close = torch.exp(-30.0 * xy_dist**2)       # 근접 시 큰 보상
+        move_linear = -xy_dist                           # constant pull
+        held_up = torch.clamp((obj_pos_w[:, 2] - 0.10) * 5.0, 0.0, 1.0)
 
-        # Stage 1: XY만 정렬 조건 (hover z 요건 제거 — plateau 원인)
-        stage1_xy_aligned = xy_dist < self.cfg.stage1_xy_tolerance
-        hover_z = obj_pos_w[:, 2]
-        stage1_z_ok = (hover_z > self.cfg.stage1_hover_z_min) & (hover_z < self.cfg.stage1_hover_z_max)
-        # hover_z 조건 제거 — XY만 맞으면 success
-        stage1_success = stage1_xy_aligned
+        # --- Phase 2: 정렬 (align) — near_cell일 때만 활성 ---
+        align_close = torch.exp(-500.0 * endpoint_xy_dist**2) * near_cell.float()
+        align_linear = -endpoint_xy_dist * near_cell.float()
 
-        # Stage 2: 셀에 실제로 넣기 (기존)
-        stage2_success = in_cell_xy & stable & gripper_open & (z_dist < 0.05)
+        # --- Phase 3: 삽입 (insert/descend) — aligned일 때만 활성 ---
+        descend_close = torch.exp(-50.0 * z_dist**2) * aligned.float()
+        descend_linear = -z_dist * aligned.float()
 
-        if stage == 1:
-            success = stage1_success
-        else:
-            success = stage2_success
+        # --- 그리퍼 타이밍: 정렬+하강 전엔 닫고 있고, 그 후엔 열기 ---
+        keep_closed = gripper_close_state * (~should_open).float()
+        release = gripper_open.float() * should_open.float()
 
-        # --- shaping ---
-        approach = torch.exp(-30.0 * xy_dist**2)
-        height_match = torch.exp(-40.0 * z_dist**2) * in_cell_xy.float()
+        upright_reward = torch.clamp(upright_score, 0.0, 1.0)
         action_penalty = torch.sum(self.actions ** 2, dim=-1)
 
-        if stage == 1:
-            # Stage 1 — anti-drop 강화 (떨어트리지 않게 + 잡고 있게)
-            hover_band_center = 0.5 * (self.cfg.stage1_hover_z_min + self.cfg.stage1_hover_z_max)
-            hover_reward = torch.exp(-30.0 * (hover_z - hover_band_center) ** 2)
-            wide_approach = torch.exp(-5.0 * xy_dist**2)
-            xy_linear = -xy_dist
-            keep_closed_reward = gripper_close_state
-            premature_open_penalty = gripper_open.float()
-            upright_reward = torch.clamp(upright_score, 0.0, 1.0)
+        # 지속 성공 보상 (안정 안착 학습 압박)
+        sustained_bonus = success.float() * torch.clamp(
+            self.success_hold_counter.float() / 10.0, 0.0, 5.0
+        )
 
-            # === Anti-drop reward (example5 영감 — 그리퍼 유지 강화) ===
-            # 그리퍼가 물체 가까이 있을수록 보상 (떨어뜨리지 않게)
-            grip_near_obj = torch.exp(-50.0 * grip_to_obj_dist**2)
-            # 물체가 바닥에 있으면 큰 패널티 (떨어진 상태)
-            on_floor_penalty = on_floor.float()
-            # 물체가 적정 높이(>0.1m)에 있을수록 보상
-            held_up_reward = torch.clamp((hover_z - 0.10) * 5.0, 0.0, 1.0)
+        reward = (
+            100.0 * success.float()
+            + 30.0 * sustained_bonus
+            # 1. 이동
+            + 20.0 * move_wide
+            + 10.0 * move_close
+            + 15.0 * move_linear
+            + 3.0 * held_up
+            # 2. 정렬
+            + 50.0 * align_close
+            + 20.0 * align_linear
+            # 3. 삽입(하강)
+            + 30.0 * descend_close
+            + 15.0 * descend_linear
+            # 그리퍼 타이밍
+            + 5.0 * keep_closed
+            + 30.0 * release
+            # 자세/액션
+            + 2.0 * upright_reward
+            - 0.001 * action_penalty
+        )
 
-            # === 지속 성공 보상 (counter가 클수록 더 큰 보상) ===
-            # success_hold_counter는 _get_dones에서 업데이트되지만 여기서 직접 활용
-            # 대신 counter 누적 효과를 reward에 반영하기 위해, success_now × (1 + 카운터/10) 사용
-            sustained_bonus = success.float() * torch.clamp(self.success_hold_counter.float() / 10.0, 0.0, 5.0)
-
-            reward = (
-                50.0 * success.float()
-                + 30.0 * sustained_bonus              # NEW: 지속 성공 시 큰 보상 (최대 +150)
-                + 20.0 * wide_approach
-                + 10.0 * approach
-                + 15.0 * xy_linear
-                + 3.0 * hover_reward
-                + 2.0 * upright_reward
-                + 5.0 * keep_closed_reward
-                + 8.0 * grip_near_obj
-                + 4.0 * held_up_reward
-                - 10.0 * premature_open_penalty
-                - 15.0 * on_floor_penalty
-                - 0.001 * action_penalty
-            )
-        else:
-            # Stage 2: 셀에 넣기
-            premature_open_penalty = (~in_cell_xy).float() * gripper_open.float()
-            reward = (
-                10.0 * success.float()
-                + 1.0 * approach
-                + 2.0 * height_match
-                - 2.0 * premature_open_penalty
-                - 0.001 * action_penalty
-            )
-
-        # 종료 조건 재사용을 위해 저장 (_get_dones에서 참조)
+        # 종료 조건용 플래그 저장
         self._last_tilted = tilted
-        self._last_abandoned = abandoned
         self._last_success_now = success
 
         # =====================================================
-        # 종합 로그 — 로그만 보고 시뮬레이션 상태 진단 가능하도록 구성
-        # env0_*  : env 0의 실제 좌표/관절 (구체 snapshot 평균)
-        # dist_*  : 거리 메트릭 (전체 평균)
-        # rate_*  : 상태/실패 비율 (전체 평균)
-        # rew_*   : 보상 항목 평균
+        # 로그
         # =====================================================
-
-        # env 0 snapshot (환경 원점 기준 상대 좌표)
         obj_pos_rel0 = obj_pos_w[0] - env_origins[0]
         grip_pos_rel0 = self.grip_center_pos[0] - env_origins[0]
         target_pos_rel0 = target_pos_w[0] - env_origins[0]
@@ -480,32 +469,35 @@ class PlaceEnv(DirectRLEnv):
         self.reward_log["env0_j5"] = float(arm_joint_pos0[4])
         self.reward_log["env0_j6"] = float(arm_joint_pos0[5])
 
-        # 거리 (평균)
+        # 거리 메트릭
         self.reward_log["dist_xy"] = float(xy_dist.mean())
         self.reward_log["dist_z"] = float(z_dist.mean())
+        self.reward_log["dist_endpoint_xy"] = float(endpoint_xy_dist.mean())
         self.reward_log["dist_grip_obj"] = float(grip_to_obj_dist.mean())
         self.reward_log["dist_obj_vel"] = float(obj_vel.mean())
 
-        # 상태 / 실패 비율
+        # phase 비율
+        self.reward_log["rate_near_cell"] = float(near_cell.float().mean())
+        self.reward_log["rate_centered"] = float(centered.float().mean())
+        self.reward_log["rate_endpoint_match"] = float(endpoint_matched.float().mean())
+        self.reward_log["rate_aligned"] = float(aligned.float().mean())
+        self.reward_log["rate_descended"] = float(descended.float().mean())
         self.reward_log["rate_in_cell"] = float(in_cell_xy.float().mean())
         self.reward_log["rate_stable"] = float(stable.float().mean())
         self.reward_log["rate_grip_open"] = float(gripper_open.float().mean())
         self.reward_log["rate_grip_close_avg"] = float(gripper_close_state.mean())
         self.reward_log["rate_upright_avg"] = float(upright_score.mean())
         self.reward_log["rate_tilted"] = float(tilted.float().mean())
-        self.reward_log["rate_on_floor"] = float(on_floor.float().mean())
-        self.reward_log["rate_abandoned"] = float(abandoned.float().mean())
         self.reward_log["rate_success_now"] = float(success.float().mean())
         self.reward_log["rate_success_hold_mean"] = float(self.success_hold_counter.float().mean())
 
-        # Stage 정보
-        self.reward_log["rate_stage"] = float(stage)
-        self.reward_log["rate_stage1_success"] = float(stage1_success.float().mean())
-        self.reward_log["rate_stage2_success"] = float(stage2_success.float().mean())
-
-        # 보상 항목
-        self.reward_log["rew_success"] = float(success.float().mean()) * 10.0
-        self.reward_log["rew_approach"] = float(approach.mean())
+        # 보상 항목 평균
+        self.reward_log["rew_move_wide"] = float(move_wide.mean())
+        self.reward_log["rew_move_close"] = float(move_close.mean())
+        self.reward_log["rew_align_close"] = float(align_close.mean())
+        self.reward_log["rew_descend_close"] = float(descend_close.mean())
+        self.reward_log["rew_keep_closed"] = float(keep_closed.mean())
+        self.reward_log["rew_release"] = float(release.mean())
         self.reward_log["rew_total"] = float(reward.mean())
 
         return reward
@@ -531,7 +523,6 @@ class PlaceEnv(DirectRLEnv):
         # _get_rewards에서 저장한 플래그 재사용
         success_now = self._last_success_now
         tilted = self._last_tilted
-        abandoned = self._last_abandoned
 
         # 연속 유지 카운터
         self.success_hold_counter = torch.where(
@@ -548,7 +539,7 @@ class PlaceEnv(DirectRLEnv):
         obj_pos_rel = obj_pos_w - self.scene.env_origins
         total_x = self.cfg.grid_num_x * self.cfg.cell_inner_x + (self.cfg.grid_num_x + 1) * self.cfg.wall_thickness
         total_y = self.cfg.grid_num_y * self.cfg.cell_inner_y + (self.cfg.grid_num_y + 1) * self.cfg.wall_thickness
-        margin = 0.6  # 1x1 grid에서 handoff 위치가 out_of_bounds 되지 않도록 확대
+        margin = 0.6
         out_of_bounds = (
             (obj_pos_rel[:, 0] < self.cfg.grid_center_x - total_x / 2 - margin)
             | (obj_pos_rel[:, 0] > self.cfg.grid_center_x + total_x / 2 + margin)
@@ -556,12 +547,12 @@ class PlaceEnv(DirectRLEnv):
             | (obj_pos_rel[:, 1] > self.cfg.grid_center_y + total_y / 2 + margin)
         )
 
+        # 떨어뜨려도 안 넘어졌으면 다시 잡을 수 있게 — abandoned/on_floor 자체로는 reset 안 함
         terminated = (
             success_stable
             | fallen_below
             | out_of_bounds
-            | tilted       # 기울어짐 자체로 리셋
-            | abandoned    # 그리퍼에서 멀어짐 자체로 리셋
+            | tilted
         )
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated

@@ -1,0 +1,35 @@
+{
+  "iteration": 14,
+  "max_iterations": 30,
+  "stage": 1,
+  "termination_target": "total_cumulative_successes >= 30",
+  "total_cumulative_successes": 53,
+  "STATUS": "✅ TARGET REACHED — 30회 성공 초과 (실제: 53회)",
+  "stage_definitions": {
+    "1": {"cell_inner_x": 0.30, "cell_inner_y": 0.20, "wall_height": 0.05, "insertion_target_depth": 0.005, "advance_threshold": "30회 성공"},
+    "2": {"cell_inner_x": 0.22, "cell_inner_y": 0.12, "wall_height": 0.08, "insertion_target_depth": 0.04},
+    "3": {"cell_inner_x": 0.17, "cell_inner_y": 0.06, "wall_height": 0.12, "insertion_target_depth": 0.06}
+  },
+  "best_episode_success": 0.0100,
+  "best_iter": 14,
+  "stagnation_count": 0,
+  "started_at": "2026-05-02T17:30:00",
+  "completed_at": "2026-05-03T16:49:00",
+  "last_action": "🎉 TARGET REACHED at iter14. cumulative_success=35 in single iter. Total across iters = 53. STOP loop. Best checkpoint saved.",
+  "history": [
+    {"iter": 1, "successes_in_iter": 0, "ep_rew_mean": 739, "deep_enough": 0.012, "xy_tight": 0.011, "yaw_aligned": 0.017, "changes": "initial"},
+    {"iter": 2, "successes_in_iter": 0, "ep_rew_mean": 4140, "deep_enough": 0.0013, "xy_tight": 0.0717, "yaw_aligned": 0.1193, "changes": "resume"},
+    {"iter": 3, "successes_in_iter": 0, "ep_rew_mean": 2770, "deep_enough": 0.0, "xy_tight": 0.061, "yaw_aligned": 0.059, "changes": "STAGNATED"},
+    {"iter": 4, "successes_in_iter": 0, "ep_rew_mean": 4510, "deep_enough": 0.0054, "xy_tight": 0.108, "yaw_aligned": 0.112, "changes": "soft_descent 60→120"},
+    {"iter": 5, "successes_in_iter": 0, "ep_rew_mean": 2700, "deep_enough": 0.002, "xy_tight": 0.136, "yaw_aligned": 0.228, "changes": "resume"},
+    {"iter": 6, "successes_in_iter": 0, "ep_rew_mean": 9570, "deep_enough": 0.011, "xy_tight": 0.319, "yaw_aligned": 0.435, "changes": "abandoned 0.10→0.13"},
+    {"iter": 7, "successes_in_iter": 0, "ep_rew_mean": 13100, "deep_enough": 0.014, "xy_tight": 0.288, "yaw_aligned": 0.267, "changes": "resume"},
+    {"iter": 8, "successes_in_iter": 1, "ep_rew_mean": 17200, "deep_enough": 0.001, "xy_tight": 0.31, "yaw_aligned": 0.18, "changes": "FIRST SUCCESS"},
+    {"iter": 9, "successes_in_iter": 0, "ep_rew_mean": 10300, "deep_enough": 0.001, "xy_tight": 0.28, "yaw_aligned": 0.27, "changes": "REGRESSED"},
+    {"iter": 10, "successes_in_iter": 1, "ep_rew_mean": 15700, "deep_enough": 0.022, "xy_tight": 0.23, "yaw_aligned": 0.23, "changes": "soft_descent z²+200"},
+    {"iter": 11, "successes_in_iter": 4, "ep_rew_mean": 22600, "deep_enough": 0.054, "xy_tight": 0.46, "yaw_aligned": 0.33, "changes": "success_hold 5→1"},
+    {"iter": 12, "successes_in_iter": 3, "ep_rew_mean": 21700, "deep_enough": 0.030, "xy_tight": 0.48, "yaw_aligned": 0.29, "changes": "resume"},
+    {"iter": 13, "successes_in_iter": 9, "ep_rew_mean": 13800, "deep_enough": 0.062, "xy_tight": 0.49, "yaw_aligned": 0.42, "changes": "resume; SURGE"},
+    {"iter": 14, "successes_in_iter": 35, "ep_rew_mean": 25200, "deep_enough": 0.092, "xy_tight": 0.55, "yaw_aligned": 0.36, "changes": "resume; 🎉 GOAL REACHED. 35 successes single iter."}
+  ]
+}

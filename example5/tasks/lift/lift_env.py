@@ -567,7 +567,7 @@ class LiftEnv(DirectRLEnv):
         upright_score = world_up_from_obj[:, 2]
 
         # upright_score < 0.3 → 약 72도 이상 기울어진 상태 → 넘어진 것으로 판단
-        fallen = upright_score < 0.3
+        fallen = upright_score < 0.3  # original threshold (변경해도 효과 없음 검증됨)
 
         # --------------------------------------------------
         # 7) 성공 보상
@@ -659,7 +659,7 @@ class LiftEnv(DirectRLEnv):
         world_up_from_obj = quat_apply(obj_quat, local_up)
         upright_score = world_up_from_obj[:, 2]
 
-        fallen = upright_score < 0.3
+        fallen = upright_score < 0.3  # original threshold (변경해도 효과 없음 검증됨)
 
         # 종료 조건 (세 가지 중 하나라도 True면 에피소드 종료)
         # | → OR 연산 (하나라도 True이면 True)

@@ -64,32 +64,78 @@ def main():
     print(f"✅ 모델 로드: {args_cli.checkpoint}")
 
     # ------------------------------------------------------------------
-    # 재생 루프
+    # 재생 루프 (종료 원인 출력)
     # ------------------------------------------------------------------
+    from isaaclab.utils.math import quat_apply
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    while not hasattr(raw_env, "_object"):
+        raw_env = getattr(raw_env, "venv", None) or getattr(raw_env, "env", None)
+        if raw_env is None:
+            break
+
     obs = env.reset()
 
-    episode_count   = 0
-    success_count   = 0
+    episode_count = 0
+    success_count = 0
+    fallen_count = 0
+    tilted_count = 0
+    timeout_count = 0
     episode_rewards = []
-    current_reward  = 0.0
+    current_reward = 0.0
+    step_in_ep = 0
+    max_z_in_ep = 0.0
+
+    LIFT_THRESHOLD = float(cfg.lift_height_threshold)
+    MAX_STEPS = int(cfg.episode_length_s / (cfg.sim.dt * cfg.decimation))
 
     while simulation_app.is_running():
+        # ★ step 전 (=현재 frame) 상태 미리 캡쳐 — 자동 reset 직전 값 보존
+        env_z = float(raw_env.scene.env_origins[0, 2].item())
+        obj_z_rel = float(raw_env._object.data.root_pos_w[0, 2].item()) - env_z
+        max_z_in_ep = max(max_z_in_ep, obj_z_rel)
+
+        obj_quat = raw_env._object.data.root_quat_w[0:1]
+        local_up = torch.zeros((1, 3), device=raw_env.device); local_up[:, 2] = 1.0
+        upright = float(quat_apply(obj_quat, local_up)[0, 2].item())
+
         actions, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = env.step(actions)
         current_reward += float(rewards[0])
+        step_in_ep += 1
 
         if dones[0]:
             episode_count += 1
             episode_rewards.append(current_reward)
 
-            # 성공 여부 출력
-            # VecNormalize를 거쳤으므로 info에서 height 확인
+            # 종료 원인 추정 — max_z 가 threshold 의 0.99 이상이면 success
+            if max_z_in_ep >= LIFT_THRESHOLD * 0.99:
+                tag, mark = "SUCCESS", "✅"
+                success_count += 1
+            elif obj_z_rel < -0.05:
+                tag, mark = "FALLEN ", "⬇️"
+                fallen_count += 1
+            elif upright < 0.4:
+                tag, mark = "TILTED ", "🔄"
+                tilted_count += 1
+            elif step_in_ep >= MAX_STEPS - 5:
+                tag, mark = "TIMEOUT", "⏰"
+                timeout_count += 1
+            else:
+                tag, mark = "?      ", "❓"
+
+            sr = success_count / episode_count
             print(
-                f"Episode {episode_count:4d} | "
-                f"reward={current_reward:8.2f} | "
-                f"avg_last10={sum(episode_rewards[-10:])/min(10, len(episode_rewards)):.2f}"
+                f"Ep {episode_count:3d} {mark} {tag} | "
+                f"max_z={max_z_in_ep:.3f} (target={LIFT_THRESHOLD:.2f}) | "
+                f"steps={step_in_ep:3d} | "
+                f"upright={upright:+.2f} | "
+                f"reward={current_reward:7.1f} | "
+                f"SR={sr:.2%} ({success_count}/{episode_count}) "
+                f"[F={fallen_count} T={tilted_count} O={timeout_count}]"
             )
             current_reward = 0.0
+            step_in_ep = 0
+            max_z_in_ep = 0.0
 
     env.close()
 

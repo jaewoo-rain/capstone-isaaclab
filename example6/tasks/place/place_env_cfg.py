@@ -114,8 +114,8 @@ class PlaceEnvCfg(DirectRLEnvCfg):
     # 7. 그리드 파라미터
     # 3×3 셀, 중심 (0.25, -0.45), 수직 4개 + 수평 4개 벽 (corner overlap 허용)
     # -------------------------
-    grid_num_x: int = 1
-    grid_num_y: int = 1
+    grid_num_x: int = 3
+    grid_num_y: int = 3
 
     # 그리드 중심 (환경 원점 기준) — TODO: validate in sim
     grid_center_x: float = 0.25
@@ -147,6 +147,17 @@ class PlaceEnvCfg(DirectRLEnvCfg):
     # 셀 내부 허용 오차 (XY 거리) — 이보다 가까우면 타겟 셀 안으로 간주
     cell_tolerance: float = 0.015
 
+    # === 정렬(align) 단계 파라미터 ===
+    # 박스 길이축의 한쪽 끝점이 셀의 끝점과 이 거리 이내면 정렬 완료 → 하강 활성
+    alignment_tolerance: float = 0.005    # 0.5cm
+    # XY 중심 거리가 이 값 이내일 때부터 정렬 reward 활성 (gating)
+    near_cell_threshold: float = 0.05     # 5cm
+
+    # 박스/셀 끝점 방향 부호 (+1 = +x 끝, -1 = -x 끝)
+    # 박스 local: 길이축 = local x. 카메라 반대쪽 끝을 정렬 기준으로 사용.
+    object_endpoint_sign: float = 1.0
+    cell_endpoint_sign: float = 1.0
+
     # 물체 속도가 이 값 이하이면 "정지" 판정
     stable_vel_threshold: float = 0.02
 
@@ -159,23 +170,21 @@ class PlaceEnvCfg(DirectRLEnvCfg):
     # 물체가 이 z 아래로 떨어지면 실패
     object_fall_z: float = -0.05
 
-    # 종료 조건 (tilt + on_floor + abandoned)
+    # 종료 조건
+    # 떨어뜨려서 넘어진 경우(tilted)만 reset, 떨어졌어도 안 넘어지면 다시 잡을 수 있게 둠
     tilt_upright_threshold: float = 0.3     # upright_score 이 값 이하면 기울어짐 (≈72도)
-    on_floor_z_threshold: float = 0.10      # 물체 중심 z가 이 이하면 바닥 판정
-    abandoned_dist_threshold: float = 0.15  # 그리퍼↔물체 거리가 이 이상이면 버려짐
+    # (deprecated — 더 이상 reward/dones에서 사용 안 함)
+    on_floor_z_threshold: float = 0.10
+    abandoned_dist_threshold: float = 0.15
 
     # -------------------------
-    # Curriculum stage
-    # 1 = 상자 위에 옮기기 (XY만 맞추면 됨, gripper 열 필요 없음)
-    # 2 = 셀에 넣기 (XY + Z + gripper open + stable)
-    # 자율 loop에서 stage 1 성공률 > 50% 달성 시 stage 2로 전환
+    # (deprecated) Curriculum stage — 사용자 요청으로 단일 통합 reward 사용
+    # 필드는 호환을 위해 유지하지만 _get_rewards에서 사용하지 않음
     # -------------------------
     curriculum_stage: int = 1
-
-    # stage 1 전용: XY 타겟 위 (벽 높이보다 위)에 도달하면 성공
-    stage1_xy_tolerance: float = 0.10       # 0.08은 너무 엄격, 0.10 유지
-    stage1_hover_z_min: float = 0.15        # 이 높이 이상에 있어야 함 (벽 위)
-    stage1_hover_z_max: float = 0.35        # 너무 높지 않게 (완화: 0.30→0.35)
+    stage1_xy_tolerance: float = 0.10
+    stage1_hover_z_min: float = 0.15
+    stage1_hover_z_max: float = 0.35
 
     # -------------------------
     # 9. Handoff randomization (sim2real 핵심)

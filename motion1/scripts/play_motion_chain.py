@@ -24,7 +24,7 @@ from isaaclab.app import AppLauncher
 
 # -------------------- argparse / app launcher --------------------
 parser = argparse.ArgumentParser(description="motion1: motion-only pick-and-place pipeline.")
-parser.add_argument("--gripper_close", type=float, default=0.7,
+parser.add_argument("--gripper_close", type=float, default=0.8,
                     help="박스 잡을 때 gripper 4-joint 동일 명령 (rad). 박스 슬립 시 키울 것.")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--repeat", type=int, default=1,
@@ -66,12 +66,12 @@ WALL_HEIGHT = 0.12
 BOX_SPAWN_ROT = (1.0, 0.0, 0.0, 0.0)
 
 # z 좌표
-PRE_GRASP_Z = BOX_SPAWN[2] + 0.06       # 박스 위 5cm  (≈0.120)
+PRE_GRASP_Z = BOX_SPAWN[2] + 0.1       # 박스 위 5cm  (≈0.120)
 GRASP_Z = BOX_SPAWN[2]+0.06               # 박스 중심   (=0.070)
-LIFT_Z = 0.40                           # 충분히 들어올림
-TRANSPORT_Z = 0.30                      # 셀 위
-PLACE_Z = BOX_SPAWN[2] + 0.1           # 셀 안 박스 중심 (박스 바닥 셀 바닥 위 1.1cm)
-RETRACT_Z = 0.40
+LIFT_Z = 0.30                           # 충분히 들어올림
+TRANSPORT_Z = 0.25                      # 셀 위
+PLACE_Z = BOX_SPAWN[2] + 0.095           # 셀 안 박스 중심 (박스 바닥 셀 바닥 위 1.1cm)
+RETRACT_Z = 0.25
 
 # 단계별 지속시간(초). dt 로 나눠서 step 수 계산.
 # IK가 trajectory 따라가는 시간이 충분히 필요하므로 넉넉하게.
@@ -282,49 +282,21 @@ def run_pipeline(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     print(f"[motion1] home finger sep (R-L): {sep_h.tolist()} | norm={sep_h.norm().item():.4f}")
     print(f"[motion1]   -> finger sep 은 X축. 박스 yaw=90° spawn 으로 박스 short edge(X)를 잡음.")
 
-    # --- 2) grasp pose (example7 fallback + joint6 += π/2) 로 워프해서 EE quat 측정 ---
-    # joint6 += π/2 → 그리퍼 wrist 90° 회전. finger sep: world X → world Y 가 됨.
-    # 그래야 박스 short edge(Y=0.044) 양옆을 잡음 (long edge X=0.139 보다 짧아 finger 사이에 들어감).
-    import math as _math
-    grasp_pose_dict = {
-        "joint1": 0.0, "joint2": 0.06, "joint3": 1.98,
-        "joint4": -1.02, "joint5": 1.26, "joint6": -0.13,
-    }
-    grasp_q = home_q.clone()
-    for n, v in grasp_pose_dict.items():
-        jid = robot.find_joints(n)[0][0]
-        grasp_q[:, jid] = v
-    robot.write_joint_state_to_sim(grasp_q, joint_vel)
-    robot.set_joint_position_target(grasp_q)
-    robot.reset()
-    for _ in range(60):
-        scene.write_data_to_sim()
-        sim.step()
-        scene.update(dt)
-
-    grasp_grip_w = grip_center_pos(robot, left_id, right_id)[0]
-    top_down_quat_w = grip_center_quat(robot, left_id)[0].clone()
-    l_g = robot.data.body_pos_w[0, left_id]
-    r_g = robot.data.body_pos_w[0, right_id]
-    sep_g = r_g - l_g
-    print(f"[motion1] grasp-pose grip (world): {grasp_grip_w.tolist()}")
-    print(f"[motion1] grasp-pose ee quat (wxyz): {top_down_quat_w.tolist()}")
-    print(f"[motion1] grasp-pose finger sep (R-L): {sep_g.tolist()} | norm={sep_g.norm().item():.4f}")
-
-    # --- 3) 다시 HOME 으로 워프 (시연 시작점) ---
-    robot.write_joint_state_to_sim(home_q, joint_vel)
-    robot.set_joint_position_target(home_q)
-    robot.reset()
-    box.reset()
-    for _ in range(60):
-        scene.write_data_to_sim()
-        sim.step()
-        scene.update(dt)
-
-    # 모든 단계의 target EE orientation = fallback_holding_pose 의 ee_quat 그대로.
-    # (이전: R_z(90°) 추가 곱했는데, 다른 곳에서 이미 회전 적용되어 있어서 180° 회전 → 빼야 함)
-    ee_quat_target_w = top_down_quat_w.unsqueeze(0)  # (1, 4)
-    print(f"[motion1] target quat (no extra rotation): {ee_quat_target_w[0].tolist()}")
+    # --- target EE orientation 직접 명시 ---
+    # 이전: grasp pose 로 워프해서 EE quat 측정 → hardcoded joint 자세에 의존, 부정확.
+    # 신규: world frame 에서 "수직 아래 + finger Y 양옆" 자세를 quat 으로 직접 정의.
+    # IK 가 알아서 joint 풀어줌.
+    #
+    # URDF 분석: finger body 의 local frame 은 wrist (rh_p12_rn_*1) 와 동일 (rpy=0).
+    # finger sep 방향 = local Y 축. → world frame 에서 ee local Y = world ±Y 가 되어야 함.
+    # ee local Z = world -Z (수직 아래) 이어야 함.
+    #
+    # 시도/에러 후보 (시도 1: (0, 1, 0, 0) = 180° around world X):
+    #   - 결과: ee z flip (world -z), ee y flip, ee x 그대로
+    # 만약 결과가 finger 가 박스 short edge 잡지 않으면 (0, 0, 1, 0) 으로 변경 시도.
+    EE_DOWN_QUAT = (0.0, 1.0, 0.0, 0.0)   # (w, x, y, z)
+    ee_quat_target_w = torch.tensor([list(EE_DOWN_QUAT)], device=device)  # (1, 4)
+    print(f"[motion1] target quat (hardcoded vertical-down): {ee_quat_target_w[0].tolist()}")
 
     # --- waypoints (env-relative xyz) ---
     bx, by, _ = BOX_SPAWN

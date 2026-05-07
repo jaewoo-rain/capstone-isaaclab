@@ -104,6 +104,10 @@ class PlaceEnv(DirectRLEnv):
         self._last_abandoned = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._last_inserted = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._last_xy_aligned_loose = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._last_tilted_settled = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._last_grip_holding = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._last_high_enough = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._last_dropped_on_floor = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
         # Episode-level 성공률 추적 (롤링 윈도우)
         from collections import deque
@@ -414,65 +418,113 @@ class PlaceEnv(DirectRLEnv):
         endpoint_aligned = endpoint_single_axis_diff < self.cfg.yaw_tolerance  # 끝점 단일축 (4cm)
 
         # ===========================================================
-        # example7 = XY-Align Task (2026-05-06 redesign)
-        # 목표: 박스 xy 를 셀 중심에 맞추고 z=0.30 유지, 잡고 있기
+        # example7 v3 = XY-Align Task (2026-05-06 — drop penalty 추가)
+        # 사용자 사양:
+        #  1. 꽉 잡고 놓치지 않기 (+ drop 페널티)
+        #  2. 너무 빠르게 움직이지 않기 (action penalty)
+        #  3. xy 거리 가까워질수록 ↑ (exp 형식, 항상 받음)
+        #  4. xy<1cm AND 잡고있음 → 2초 유지 시 성공
         # ===========================================================
-        high_enough = hover_z >= 0.28        # 셀 격벽 위 안전 높이
-        grip_holding = (grip_to_obj_dist < 0.08) & (gripper_close_state > 0.5)
-        success = xy_aligned & high_enough & grip_holding
+        xy_aligned_tight = xy_dist < 0.01  # 1cm 이내
 
-        # ── 6-Tier Reward (all-positive) ─────────────────────────
-        # T0: 부드러운 pull (멀어도 항상 gradient)
-        r_pull = 1.0 / (1.0 + 5.0 * xy_dist)
+        # 박스 중심 대신 가까운 endpoint 까지 거리로 측정
+        # example5 가 박스 한쪽 끝을 잡으므로 obj_pos 까지 거리는 ≈ size_x/2 = 7cm 가 됨
+        # 양쪽 endpoint 중 가까운 쪽 (실제 잡는 쪽) 까지 거리는 잡혀있을 때 ≈ 0
+        endpoint_pos = obj_pos_w + quat_apply(obj_quat,
+            torch.cat([torch.full((obj_pos_w.shape[0], 1), obj_size_x * 0.5, device=self.device),
+                       torch.zeros((obj_pos_w.shape[0], 2), device=self.device)], dim=-1))
+        endpoint_neg = obj_pos_w + quat_apply(obj_quat,
+            torch.cat([torch.full((obj_pos_w.shape[0], 1), -obj_size_x * 0.5, device=self.device),
+                       torch.zeros((obj_pos_w.shape[0], 2), device=self.device)], dim=-1))
+        grip_to_endpoint_dist = torch.minimum(
+            torch.norm(self.grip_center_pos - endpoint_pos, dim=-1),
+            torch.norm(self.grip_center_pos - endpoint_neg, dim=-1),
+        )
+        grip_holding = (grip_to_endpoint_dist < 0.04) & (gripper_close_state > 0.5)
+        success = xy_aligned_tight & grip_holding
 
-        # T1: XY 정렬 (가우시안, sharpen)
-        r_xy = torch.exp(-25.0 * xy_dist ** 2)
+        # 떨어뜨린 상태 (바닥에 닿았는데 잡고 있지 않음)
+        dropped_on_floor = on_floor & (~grip_holding)
 
-        # T2: 높이 유지 (z 0.20→0.30 ramp, plateau 1)
-        r_high = torch.clamp((hover_z - 0.20) / 0.10, 0.0, 1.0)
+        # ── v5b: drop=reset → 게이팅 제거 ──────────────────────
+        # drop 즉시 reset 되므로 episode 동안 항상 grip_holding=True
+        # 게이팅 곱셈 redundant → 단순화
+        # 1. 잡고 있기 (압도적 인센티브)
+        r_grip_holding = grip_holding.float()
 
-        # T3: 잡기 유지 (떨어뜨리지 말라는 신호)
-        r_grip_near = torch.exp(-50.0 * grip_to_obj_dist ** 2)
-        r_grip_holding = r_grip_near * gripper_close_state
+        # 2a. xy 끌어당김 (gentle gaussian)
+        r_pull = torch.exp(-25.0 * xy_dist ** 2)
 
-        # T4: 수직 유지 (continuous)
-        r_upright = torch.clamp(upright_score, 0.0, 1.0)
+        # 2b. xy 정밀 정렬 (sharp gaussian, 1cm lock-in)
+        r_xy = torch.exp(-200.0 * xy_dist ** 2)
 
-        # T5: 성공 spike
+        # 3. 빠른 동작 페널티
+        action_penalty = torch.sum(self.actions ** 2, dim=-1)
+
+        # 4. 떨어뜨림 페널티 (drop 시 reset → 1회만 적용)
+        r_dropped = dropped_on_floor.float()
+
+        # 5. 성공
         r_success = success.float()
 
+        # 6. 연속 정렬 보너스 — hold 길이에 비례
+        proj_hold_counter = torch.where(
+            success,
+            self.success_hold_counter + 1,
+            torch.zeros_like(self.success_hold_counter),
+        )
+        r_hold = torch.clamp(proj_hold_counter.float() / 60.0, 0.0, 1.0)
+
+        # 7. 박스 수직 유지 (NEW v10) — clamp(upright, 0, 1)
+        r_upright = torch.clamp(upright_score, 0.0, 1.0)
+
+        # 8. Z 높이 유지 (NEW v10) — target 0.30m (셀 격벽 위 18cm, 충돌 안전)
+        # gaussian 형태, z=0.30 에서 1.0, z=0.20 에서 0.74
+        r_z = torch.exp(-30.0 * (hover_z - 0.30) ** 2)
+
+        # v10: upright + z 추가
         reward = (
-              50.0 * r_pull           # 0~50, 항상 gradient
-            + 100.0 * r_xy             # 0~100, sharp 정렬
-            +  80.0 * r_high           # 0~80, z 충분히 높이
-            +  50.0 * r_grip_holding   # 0~50, 잡기 유지 (drop 방지)
-            +  20.0 * r_upright        # 0~20, 수직 유지
-            + 1000.0 * r_success       # spike
+              20.0   * r_grip_holding   # 1. 잡기
+            + 10.0   * r_pull           # 2a. gentle gradient
+            + 30.0   * r_xy             # 2b. sharp lock-in
+            + 100.0  * r_success        # 5. 성공 spike
+            + 10.0   * r_hold           # 6. 연속 정렬 보너스
+            + 20.0   * r_upright        # 7. 박스 수직 (v11: 5 → 20, 강제)
+            + 10.0   * r_z              # 8. z=0.30 유지 (NEW)
+            -   0.05 * action_penalty   # 3. 빠른 동작
+            -   5.0  * r_dropped        # 4. 떨어뜨림
         )
 
+        # 어딘가 안착 + 기울어짐 (바닥/격벽/박스 위 모두)
+        tilted_settled = tilted & (obj_vel < 0.1)
+
         # 호환 로그 변수
-        r_xy_close = r_xy
-        r_z_close = r_high
+        r_xy_close = r_pull
+        r_z_close = torch.zeros_like(reward)
         r_endpoint_aligned = (xy_aligned & endpoint_aligned).float()
         r_endpoint_aligned_gated = torch.zeros_like(reward)
         r_keep_closed = r_grip_holding
-        r_grip_near_obj = r_grip_near
+        r_grip_near_obj = torch.exp(-50.0 * grip_to_obj_dist ** 2)
+        r_upright = torch.clamp(upright_score, 0.0, 1.0)
         r_not_tilted = torch.zeros_like(reward)
         r_severe_tilt = torch.zeros_like(reward)
         r_above_when_unaligned = torch.zeros_like(reward)
-        action_penalty = torch.zeros_like(reward)
         xy_upright_ready = torch.zeros_like(reward)
+        r_high = torch.zeros_like(reward)
+        high_enough = torch.zeros_like(reward, dtype=torch.bool)
         abandoned = grip_to_obj_dist > self.cfg.abandoned_dist_threshold
 
         # 종료 조건 플래그
         self._last_tilted = tilted
-        self._last_severely_tilted = upright_score < 0.0  # 사용 안 함 (호환만)
-        self._last_abandoned = abandoned                    # 사용 안 함 (호환만)
+        self._last_severely_tilted = upright_score < 0.0  # 호환만
+        self._last_abandoned = abandoned                    # 호환만
         self._last_success_now = success
-        self._last_inserted = on_floor                      # = dropped on floor
+        self._last_inserted = on_floor
         self._last_xy_aligned_loose = xy_aligned_loose
         self._last_grip_holding = grip_holding
         self._last_high_enough = high_enough
+        self._last_tilted_settled = tilted_settled
+        self._last_dropped_on_floor = dropped_on_floor
 
         # ===========================================================
         # 로그 — 핵심만
@@ -556,8 +608,14 @@ class PlaceEnv(DirectRLEnv):
         self.reward_log["rew_n3_grip_holding"] = float(r_grip_holding.mean())
         self.reward_log["rew_n4_upright"] = float(r_upright.mean())
         self.reward_log["rew_n5_success"] = float(r_success.mean())
+        self.reward_log["rew_n6_dropped"] = float(r_dropped.mean())
+        self.reward_log["rew_n7_hold"] = float(r_hold.mean())
+        self.reward_log["rew_n8_upright"] = float(r_upright.mean())
+        self.reward_log["rew_n9_z"] = float(r_z.mean())
         self.reward_log["rate_high_enough"] = float(high_enough.float().mean())
         self.reward_log["rate_grip_holding"] = float(grip_holding.float().mean())
+        self.reward_log["rate_dropped_on_floor"] = float(dropped_on_floor.float().mean())
+        self.reward_log["dist_grip_endpoint"] = float(grip_to_endpoint_dist.mean())
 
         return reward
 
@@ -584,9 +642,8 @@ class PlaceEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # _get_rewards에서 저장한 플래그 재사용
         success_now = self._last_success_now
-        tilted = self._last_tilted
 
-        # 연속 유지 카운터
+        # 연속 유지 카운터 (success_hold_steps 는 cfg 에서 120 = 2초)
         self.success_hold_counter = torch.where(
             success_now,
             self.success_hold_counter + 1,
@@ -594,11 +651,12 @@ class PlaceEnv(DirectRLEnv):
         )
         success_stable = self.success_hold_counter >= self.cfg.success_hold_steps
 
-        # v2 done: 떨어뜨려서 바닥에 닿았고 + 기울어진 경우만 reset
-        # (공중에서 기울어짐 OK, 셀벽 충돌 OK, 그리퍼 멀어짐 OK)
-        tilted_on_floor = tilted & self._last_inserted
+        # v3 done: 어딘가에 안착(정지) + 기울어짐 = reset
+        tilted_settled = self._last_tilted_settled
+        # v5 추가: 박스 떨어뜨려서 바닥 닿음 = 즉시 reset (잡기 강제)
+        dropped = self._last_dropped_on_floor
 
-        terminated = success_stable | tilted_on_floor
+        terminated = success_stable | tilted_settled | dropped
         truncated = self.episode_length_buf >= self.max_episode_length - 1
 
         # Episode-level 성공률 추적 (terminated/truncated 환경 결과 기록)

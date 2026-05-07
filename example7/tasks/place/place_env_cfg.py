@@ -157,8 +157,8 @@ class PlaceEnvCfg(DirectRLEnvCfg):
     # gripper가 이 값 미만이면 "열림" 판정
     gripper_open_threshold: float = 0.2
 
-    # 성공 판정 최소 유지 스텝 (1 — 바닥 닿으면 즉시 성공 인정)
-    success_hold_steps: int = 1
+    # 성공 판정 최소 유지 스텝 (60Hz × 1s = 60; v7: 120→60 으로 완화)
+    success_hold_steps: int = 60
     # 바닥 접촉 임계 — obj_bottom_z 이하면 "바닥 닿음"으로 판정
     on_floor_touch_threshold: float = 0.005
 

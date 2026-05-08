@@ -1,16 +1,17 @@
-"""motion1 — Motion-only pipeline prototype.
+"""motion1 — Motion-only pipeline prototype (6단계).
 
-5단계 시퀀스:
-  1. Reach     : home → 박스 위 5cm  (gripper open)
-  2. Grasp     : 하강 → close → hold (안정화)
-  3. Transport : lift → 셀 위 z=0.18
-  4. Place     : 하강(insert) → release (gripper open)
-  5. Retract   : 위로 z=0.30 → home
+  1. 물체 위 이동      : home → 박스 xy + 1cm random offset (PRE_GRASP_Z)  [motion]
+  2. grasp 미세조정    : 1cm 정렬 → 정확한 박스 xy                           [RL placeholder]
+  3. 파지 + 적재 이동  : 수직 하강 → close → lift → transport (셀 + 1cm off) [motion]
+  4. insert 미세조정   : 1cm 정렬 → 정확한 셀 xy                              [RL placeholder]
+  5. 삽입              : 수직 하강 (PLACE_Z) → release                        [motion]
+  6. 복귀              : retract up → home                                    [motion]
 
 각 단계: cartesian 직선 보간 + DifferentialIKController(dls).
 EE = 양 finger body(rh_p12_rn_l2 / rh_p12_rn_r2) 평균 (jacobian / pose 모두 평균).
 
-박스 1개 / 셀 1개. RL 미사용.
+박스 1개 / 셀 1개. 단계 2 / 4 는 RL 학습 자리지만 현재는 motion 직선으로 placeholder.
+RL 도입 시 박스 위치 / yaw randomize 추가 예정.
 
 실행:
     ./isaaclab.sh -p source/motion1/scripts/play_motion_chain.py
@@ -67,25 +68,30 @@ BOX_SPAWN_ROT = (1.0, 0.0, 0.0, 0.0)
 
 # z 좌표
 PRE_GRASP_Z = BOX_SPAWN[2] + 0.1       # 박스 위 5cm  (≈0.120)
-GRASP_Z = BOX_SPAWN[2]+0.06               # 박스 중심   (=0.070)
-LIFT_Z = 0.30                           # 충분히 들어올림
-TRANSPORT_Z = 0.25                      # 셀 위
-PLACE_Z = BOX_SPAWN[2] + 0.095           # 셀 안 박스 중심 (박스 바닥 셀 바닥 위 1.1cm)
+GRASP_Z = BOX_SPAWN[2]+0.06            # 박스 중심   (=0.070)
+LIFT_Z = 0.30                          # 충분히 들어올림
+TRANSPORT_Z = 0.25                     # 셀 위
+PLACE_Z = BOX_SPAWN[2] + 0.095          # 셀 안 박스 중심 (박스 바닥 셀 바닥 위 1.1cm)
 RETRACT_Z = 0.25
 
 # 단계별 지속시간(초). dt 로 나눠서 step 수 계산.
 # IK가 trajectory 따라가는 시간이 충분히 필요하므로 넉넉하게.
 STAGE_DURATION_S: dict[str, float] = {
-    "reach": 2.0,
-    "grasp_down": 2.0,
-    "grasp_close": 1.5,
-    "lift": 2.0,
-    "transport": 3.0,
-    "descend": 2.5,
-    "release": 0.7,
-    "retract_up": 2.0,
-    "retract_home": 3.0,
+    "move_above_box": 2.0,    # 1. home → pre_grasp_offset (박스 위 1cm offset)
+    "align_grasp":    0.6,    # 2. RL placeholder — 1cm 정렬
+    "descend":        1.0,    # 3a. PRE_GRASP_Z → GRASP_Z (수직 하강)
+    "close":          1.5,    # 3b. gripper close + hold
+    "lift":           2.0,    # 3c. GRASP_Z → LIFT_Z
+    "transport":      3.0,    # 3d. lift → transport_offset (셀 위 1cm offset)
+    "align_insert":   0.6,    # 4. RL placeholder — 1cm 정렬
+    "insert":         1.5,    # 5a. TRANSPORT_Z → PLACE_Z
+    "release":        0.7,    # 5b. gripper open
+    "retract_up":     1.5,    # 6a. PLACE_Z → RETRACT_Z
+    "retract_home":   3.0,    # 6b. retract → home
 }
+
+# 정렬 단계 placeholder 의 의도된 xy 오차 (RL 학습 시 박스/셀 위치 noise 시뮬용)
+ALIGN_OFFSET_M = 0.03   # 1cm
 
 # 각 stage 끝의 settle 시간 — IK 가 trajectory 끝점에 수렴할 시간.
 SETTLE_S = 0.8
@@ -302,17 +308,31 @@ def run_pipeline(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     bx, by, _ = BOX_SPAWN
     cx, cy = CELL_CENTER_X, CELL_CENTER_Y
 
+    # 정렬 단계 (RL placeholder) 의 시작점 — 박스/셀 xy 에서 임의 방향 1cm 빗나간 곳.
+    # 매 run 마다 random 방향 (RL 학습 시 generalize 용 시뮬).
+    import math as _math
+    ang_g = float(torch.rand(1).item() * 2 * _math.pi)
+    ang_i = float(torch.rand(1).item() * 2 * _math.pi)
+    off_grasp = (ALIGN_OFFSET_M * _math.cos(ang_g), ALIGN_OFFSET_M * _math.sin(ang_g))
+    off_insert = (ALIGN_OFFSET_M * _math.cos(ang_i), ALIGN_OFFSET_M * _math.sin(ang_i))
+    print(f"[motion1] random align offset (grasp,  1cm): dxy=({off_grasp[0]*100:+.2f}, {off_grasp[1]*100:+.2f}) cm")
+    print(f"[motion1] random align offset (insert, 1cm): dxy=({off_insert[0]*100:+.2f}, {off_insert[1]*100:+.2f}) cm")
+
     waypoints = {
-        "home":      home_grip_env,
-        "pre_grasp": torch.tensor([bx, by, PRE_GRASP_Z], device=device),
-        "grasp":     torch.tensor([bx, by, GRASP_Z],     device=device),
-        "lift":      torch.tensor([bx, by, LIFT_Z],      device=device),
-        "transport": torch.tensor([cx, cy, TRANSPORT_Z], device=device),
-        "place":     torch.tensor([cx, cy, PLACE_Z],     device=device),
-        "retract":   torch.tensor([cx, cy, RETRACT_Z],   device=device),
+        "home":              home_grip_env,
+        # --- grasp side ---
+        "pre_grasp_offset":  torch.tensor([bx + off_grasp[0], by + off_grasp[1], PRE_GRASP_Z], device=device),
+        "pre_grasp":         torch.tensor([bx, by, PRE_GRASP_Z], device=device),  # 정확한 박스 위
+        "grasp":             torch.tensor([bx, by, GRASP_Z],     device=device),  # 박스 잡는 깊이
+        "lift":              torch.tensor([bx, by, LIFT_Z],      device=device),
+        # --- insert side ---
+        "transport_offset":  torch.tensor([cx + off_insert[0], cy + off_insert[1], TRANSPORT_Z], device=device),
+        "transport":         torch.tensor([cx, cy, TRANSPORT_Z], device=device),  # 정확한 셀 위
+        "place":             torch.tensor([cx, cy, PLACE_Z],     device=device),  # release z
+        "retract":           torch.tensor([cx, cy, RETRACT_Z],   device=device),
     }
     for k, v in waypoints.items():
-        print(f"[motion1] waypoint {k:>10s}: {v.tolist()}")
+        print(f"[motion1] waypoint {k:>18s}: {v.tolist()}")
 
     gripper_close = float(args_cli.gripper_close)
     print(f"[motion1] gripper close cmd: {gripper_close:.3f} rad (open=0.0)")
@@ -406,7 +426,13 @@ def run_pipeline(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             control_step(target, gripper_val)
         report(label)
 
-    # ============= 5 단계 실행 (--repeat 회 반복) =============
+    # ============= 6 단계 실행 (--repeat 회 반복) =============
+    # 1. 물체 위 이동 (1cm offset 도착)         — motion
+    # 2. grasp 미세조정 (1cm 정렬)               — RL placeholder (현재는 motion 직선)
+    # 3. 파지 + 적재 이동 (수직 하강 → close → lift → transport, 셀 1cm offset 도착) — motion
+    # 4. insert 미세조정 (1cm 정렬)              — RL placeholder (현재는 motion 직선)
+    # 5. 삽입 (수직 하강 → release)               — motion
+    # 6. 복귀 (retract → home)                  — motion
     n_repeat = max(1, int(args_cli.repeat))
     for rep in range(n_repeat):
         print(f"\n========== motion1 pipeline START (run {rep+1}/{n_repeat}) ==========")
@@ -421,28 +447,63 @@ def run_pipeline(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 sim.step()
                 scene.update(dt)
 
-        # 1. Reach — 위치 보간 + quat slerp (home_quat → corrected top-down)
-        # home 자세에서는 EE 가 위쪽을 향하고 있어서, ee_quat_target 으로 한 번에 큰 회전 풀려고 하면
-        # IK 가 발산해서 그리퍼가 뒤집힘. Slerp 로 점진적 회전 → 안정적.
-        stage_move("home", "pre_grasp", STAGE_DURATION_S["reach"], GRIPPER_OPEN, "1. Reach",
+        # ----- 1. 물체 위 이동 (motion) -----
+        # home → 박스 xy + 1cm offset, z=PRE_GRASP_Z. quat slerp 로 회전 부드럽게.
+        stage_move("home", "pre_grasp_offset",
+                   STAGE_DURATION_S["move_above_box"], GRIPPER_OPEN,
+                   "1. Move above box (1cm off)",
                    start_quat_w=home_grip_quat_w.unsqueeze(0),
                    end_quat_w=ee_quat_target_w)
 
-        # 2. Grasp
-        stage_move("pre_grasp", "grasp", STAGE_DURATION_S["grasp_down"], GRIPPER_OPEN, "2a. Grasp descend")
-        stage_hold("grasp", STAGE_DURATION_S["grasp_close"], gripper_close, "2b. Grasp close+hold")
+        # ----- 2. grasp 미세조정 (RL placeholder) -----
+        # 1cm offset → 정확한 박스 xy. 현재는 motion 직선 보간.
+        # TODO(RL): Grasp RL policy 로 교체. action=(Δx,Δy,Δz,Δyaw,gripper).
+        stage_move("pre_grasp_offset", "pre_grasp",
+                   STAGE_DURATION_S["align_grasp"], GRIPPER_OPEN,
+                   "2. Fine-align grasp [RL placeholder]")
 
-        # 3. Transport
-        stage_move("grasp", "lift", STAGE_DURATION_S["lift"], gripper_close, "3a. Lift")
-        stage_move("lift", "transport", STAGE_DURATION_S["transport"], gripper_close, "3b. Transport over cell")
+        # ----- 3. 파지 + 적재 이동 (motion) -----
+        # 3a) 수직 하강: PRE_GRASP_Z → GRASP_Z
+        stage_move("pre_grasp", "grasp",
+                   STAGE_DURATION_S["descend"], GRIPPER_OPEN,
+                   "3a. Descend to grasp depth")
+        # 3b) 그리퍼 close + hold
+        stage_hold("grasp",
+                   STAGE_DURATION_S["close"], gripper_close,
+                   "3b. Grasp close+hold")
+        # 3c) Lift: GRASP_Z → LIFT_Z
+        stage_move("grasp", "lift",
+                   STAGE_DURATION_S["lift"], gripper_close,
+                   "3c. Lift")
+        # 3d) Transport: lift → transport_offset (셀 위 1cm offset)
+        stage_move("lift", "transport_offset",
+                   STAGE_DURATION_S["transport"], gripper_close,
+                   "3d. Transport over cell (1cm off)")
 
-        # 4. Place + Insert
-        stage_move("transport", "place", STAGE_DURATION_S["descend"], gripper_close, "4a. Insert (descend)")
-        stage_hold("place", STAGE_DURATION_S["release"], GRIPPER_OPEN, "4b. Release")
+        # ----- 4. insert 미세조정 (RL placeholder) -----
+        # 1cm offset → 정확한 셀 xy. 현재는 motion 직선 보간.
+        # TODO(RL): Insert RL policy 로 교체. holding_box state 필수.
+        stage_move("transport_offset", "transport",
+                   STAGE_DURATION_S["align_insert"], gripper_close,
+                   "4. Fine-align insert [RL placeholder]")
 
-        # 5. Retract
-        stage_move("place", "retract", STAGE_DURATION_S["retract_up"], GRIPPER_OPEN, "5a. Retract up")
-        stage_move("retract", "home", STAGE_DURATION_S["retract_home"], GRIPPER_OPEN, "5b. Retract home")
+        # ----- 5. 삽입 (motion) -----
+        # 5a) 수직 하강: TRANSPORT_Z → PLACE_Z
+        stage_move("transport", "place",
+                   STAGE_DURATION_S["insert"], gripper_close,
+                   "5a. Insert descend")
+        # 5b) 그리퍼 open (release)
+        stage_hold("place",
+                   STAGE_DURATION_S["release"], GRIPPER_OPEN,
+                   "5b. Release")
+
+        # ----- 6. 복귀 (motion) -----
+        stage_move("place", "retract",
+                   STAGE_DURATION_S["retract_up"], GRIPPER_OPEN,
+                   "6a. Retract up")
+        stage_move("retract", "home",
+                   STAGE_DURATION_S["retract_home"], GRIPPER_OPEN,
+                   "6b. Retract home")
 
         # 박스 위치 보고
         obj_pos_w = box.data.root_pos_w[0] - env_origin
@@ -494,5 +555,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    simulation_app.close()
+    import os
+    try:
+        main()
+    finally:
+        simulation_app.close()
+    # PhysX 자원 해제 hang 방지 — 강제 종료
+    os._exit(0)

@@ -121,7 +121,7 @@ class GraspEnvCfg(DirectRLEnvCfg):
     # 박스 spawn (env-rel)
     box_spawn_xy: tuple[float, float] = (0.45, -0.10)
     box_spawn_z: float = 0.07
-    box_spawn_xy_noise: float = 0.02      # ±2cm
+    box_spawn_xy_noise: float = 0.1      # ±10cm
     box_spawn_yaw_max: float = 1.396      # ±80° (= 1.396 rad)
 
     # ee 시작 (박스 + offset, motion-only 의 pre_grasp_offset 와 동일 발상)
@@ -136,7 +136,7 @@ class GraspEnvCfg(DirectRLEnvCfg):
     # 8. Action scale (RL action [-1,1] → 실제 delta)
     # 나중에 튜닝 가능 (5mm/step + 3°/step)
     # =========================
-    action_scale_xy: float = 0.005        # 5 mm / step
+    action_scale_xy: float = 0.01        # 10 mm / step
     action_scale_yaw: float = 0.05        # ~2.86° / step
 
     # =========================
@@ -144,16 +144,21 @@ class GraspEnvCfg(DirectRLEnvCfg):
     # 가까이 갔을 때 신호 강하도록 exp gain 부드럽게.
     # 학습 안 되면 가중치 / gain 조정.
     # =========================
-    reward_xy_align_gain: float = 1000.0     # exp(-gain * xy_dist²)
+    reward_xy_align_gain: float = 80.0     # exp(-gain * xy_dist²)
     reward_yaw_align_gain: float = 5.0       # exp(-gain * yaw_err²)
     reward_smooth_w: float = 0.01            # -w * (vel² 합) — 부드러움 유도
-    reward_success_bonus: float = 50.0       # aligned 시 보너스
+    reward_success_bonus: float = 50.0       # aligned 매 step 시 보너스 (정렬 유지 인센티브)
+    # success terminate (success_hold_steps 도달) 시 한 번에 받는 압도적 보너스.
+    # 목적: timeout 까지 헤매다 reward 누적하는 것보다 빨리 success terminate 가 이득이 되도록.
+    reward_success_lump: float = 5000.0
 
     # =========================
     # 10. 종료 조건
     # =========================
-    align_xy_threshold: float = 0.005     # 5 mm 이내 → success
+    align_xy_threshold: float = 0.005     # 5 mm 이내 → aligned
     align_yaw_threshold: float = 0.05     # ~2.86° 이내 (3° 근사)
+    # aligned 상태로 N step 유지 시에만 success → terminate (잠깐 스쳐가는 케이스 방지)
+    success_hold_steps: int = 30          # 30 step = 0.5초 (60Hz)
     # NOTE: 학습 초기엔 ee 시작 위치가 박스에서 멀어 (fallback pose 기준 ~20cm),
     # fail_xy_threshold 가 너무 작으면 episode 가 1~3 step 에 끝나서 학습 안 됨.
     # 우선 0.30 (30cm) 으로 크게 → 학습 진행 시 점차 줄이는 curriculum 고려.

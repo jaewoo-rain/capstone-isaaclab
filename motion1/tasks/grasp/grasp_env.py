@@ -83,6 +83,9 @@ class GraspEnv(DirectRLEnv):
         self._box_yaw = torch.zeros(self.num_envs, device=self.device)            # cached
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
 
+        # aligned 상태 연속 step 카운터 (success_hold_steps 에 도달해야 success terminate)
+        self._aligned_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
         # fallback grasp pose (motion-only 와 동일 — example7 fallback_holding_joint_pos)
         # 이 자세에서 ee 는 약 (0.46, -0.30, 0.75) world. 박스 위 자연스러운 시작점.
         self._fallback_arm_pos = torch.tensor(
@@ -266,7 +269,14 @@ class GraspEnv(DirectRLEnv):
         )
         r_success = aligned.float() * self.cfg.reward_success_bonus
 
-        total = r_xy_align + r_yaw_align + r_smooth + r_success
+        # success terminate (success_hold_steps 도달) 시 한 번 받는 lump sum
+        # 주의: _get_rewards 가 _get_dones 보다 먼저 호출되는데, _get_dones 에서 카운터 +1.
+        # 즉 여기서 보는 _aligned_count 는 "이번 step 적용 전" 값.
+        # 정확히 hold_steps 도달은 (_aligned_count + 1 if aligned else 0) >= hold_steps.
+        will_succeed = aligned & ((self._aligned_count + 1) >= self.cfg.success_hold_steps)
+        r_success_lump = will_succeed.float() * self.cfg.reward_success_lump
+
+        total = r_xy_align + r_yaw_align + r_smooth + r_success + r_success_lump
 
         # log (callback 이 읽음, env 0 기준)
         self.reward_log = {
@@ -274,6 +284,7 @@ class GraspEnv(DirectRLEnv):
             "r_yaw_align": float(r_yaw_align.mean().item()),
             "r_smooth": float(r_smooth.mean().item()),
             "r_success": float(r_success.mean().item()),
+            "r_success_lump": float(r_success_lump.mean().item()),
             "aligned_rate": float(aligned.float().mean().item()),
         }
         return total
@@ -299,7 +310,16 @@ class GraspEnv(DirectRLEnv):
             (obj_rel_xy[:, 1].abs() > self.cfg.fail_xy_threshold)
         )
 
-        terminated = aligned | failed
+        # aligned 카운터 갱신: aligned 면 +1, 아니면 0 reset
+        self._aligned_count = torch.where(
+            aligned,
+            self._aligned_count + 1,
+            torch.zeros_like(self._aligned_count),
+        )
+        # success: aligned 상태로 success_hold_steps 이상 유지
+        success = self._aligned_count >= self.cfg.success_hold_steps
+
+        terminated = success | failed
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -373,6 +393,9 @@ class GraspEnv(DirectRLEnv):
         self._ee_target_xy_w[env_ids_t] = ee_world_xy_default + self.scene.env_origins[env_ids_t, :2]
         self._ee_target_yaw[env_ids_t] = 0.0
         self._prev_ee_target_yaw[env_ids_t] = 0.0
+
+        # aligned 카운터 reset
+        self._aligned_count[env_ids_t] = 0
 
         # IK 컨트롤러 reset
         self._ik.reset(env_ids_t)

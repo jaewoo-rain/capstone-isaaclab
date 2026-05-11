@@ -147,6 +147,64 @@ Do not run larger real motions until both issues are understood:
 Any future execute script must reject planned trajectories with excessive joint
 delta before sending an executable goal.
 
+## Bringup mode finding
+
+`omy_ai.launch.py` is for AI teleoperation and starts a leader/follower setup:
+
+- follower launch: `omy_f3m_follower_ai.launch.py`
+- leader launch: `omy_l100_leader_ai.launch.py`
+- follower controller remaps:
+  - `/arm_controller/joint_trajectory` -> `/leader/joint_trajectory`
+
+This mode is not appropriate for direct MoveIt real-robot execution tests.
+
+For direct MoveIt/trajectory smoke tests, use the regular bringup instead:
+
+```bash
+ros2 launch open_manipulator_bringup omy_f3m.launch.py
+```
+
+Do not add `init_position:=true` unless an intentional initial motion is wanted.
+
+With regular bringup, the controller layout matches MoveIt better:
+
+- `arm_controller`: `joint1` to `joint6`
+- `gripper_controller`: `rh_r1_joint`
+
+## Verified tiny real-robot commands
+
+The following small commands were executed with regular `omy_f3m.launch.py`
+bringup and verified through `/joint_states`:
+
+- `joint6 +0.01 rad`
+- `joint6 -0.01 rad`
+- `joint5 +0.005 rad`
+- `joint5 -0.005 rad`
+- `rh_r1_joint +0.03`
+- `rh_r1_joint -0.02`
+
+These checks confirm that direct joint-space `FollowJointTrajectory` commands
+and `gripper_controller/gripper_cmd` commands can reach the hardware when using
+the regular bringup.
+
+Keep these as smoke-test bounds for now:
+
+- arm single-joint delta <= `0.01 rad`
+- gripper delta <= `0.03`
+- no Cartesian pose execution yet
+- no full chain execution yet
+
+## Still unsafe / unresolved
+
+- MoveIt Cartesian pose goals can produce large joint deltas even for tiny EE
+  offsets. Do not execute them until trajectory joint-delta checks and
+  continuous-joint wrapping are resolved.
+- `motion2` full chain still lacks a guarded `RealAdapter`.
+- D405 image, YOLO detection, and RL grasp policy have not been validated on
+  the real robot.
+- D435 top-view detection remains disabled.
+- Original `place_z=0.165` failed planning-only checks in the tested setup.
+
 ## Next implementation steps
 
 1. Add a manual target config loader.

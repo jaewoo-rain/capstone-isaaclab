@@ -1,255 +1,486 @@
 # CLAUDE.md — motion1
 
-다음 Claude 세션이 빠르게 컨텍스트를 잡기 위한 메모.
-설계 전체는 [PLAN.md](PLAN.md) 참고. 이 파일은 **사용자가 결정한 사항** 과 **현재 작동 상태** 를 모은다.
+> **다음 Claude 세션이 즉시 컨텍스트 잡고 작업 이어갈 수 있게 작성됨**.
+> 설계 전체는 [PLAN.md](PLAN.md). 사용자 디자인 결정과 현재 상태는 이 파일.
+
+---
+
+## ⚡ TL;DR — 지금 즉시 해야 할 일 (2026-05-10)
+
+### 🎯 현재 상태: **v14 정책 학습 완료. chain runner 정렬 안 됨. 다음 = camera (vision) 통합**
+
+**v14 정책** (sim_dt 1/60 + decimation 1, mask 제거 + dual reward + action 5mm + 4M step):
+- ckpt: `checkpoints/motion1_insert_best.zip` (num_timesteps=3.94M)
+- 학습 metric: `success_recent=1~3%`, r_xy_align=0.93, r_yaw_align=0.97
+- play_insert.py 단독 시각화: 정렬 시도 OK
+- **chain runner 시각화: 여전히 정렬 안 됨** ← 미해결
+
+### 🔬 chain runner 안 되는 root cause (불명, 후보)
+
+play_insert.py = OK, chain runner = X. 같은 ckpt. obs/action 동일 식. 그런데 행동 다름. 모든 알려진 차이 fix 했지만 안 됨:
+- ✅ VecNormalize 직접 호출 (manual normalize 차이 가능 의심)
+- ✅ action_scale_xy 분리 (grasp 10mm / insert 5mm)
+- ✅ sim_dt 1/120 → 1/60 + decimation 1 (학습 cfg 와 일치)
+- ✅ cell wall collision off 시도 (효과 X)
+- ✅ insert offset 1cm 줄임 (이전 3~5cm)
+
+남은 의심 — **stage 3d 끝 자세가 학습 분포 (handoff dataset) 와 미묘하게 다름** + chain runner 의 control loop / obs 측정 timing 차이.
+
+### ✅ 다음 step: Camera (vision) 통합
+
+사용자 요청 — `play_motion_chain_with_grasp_insert.py` 의 camera 붙인 버전 새로 만들기.
+
+작업 순서:
+1. **카메라 sensor 부착** (IsaacLab `Camera` class 또는 USD camera prim)
+2. **detection** (YOLO 또는 단순 segmentation) — 박스 / cell 4 walls 위치 추정
+3. **image space → world coord 변환** (camera intrinsic/extrinsic)
+4. **그 좌표로 RL 정책 inference** (현재 ground truth obs 자리에 vision 추정 값)
+
+**학습 재학습 필요한가?** — 일단 **불필요** 추정:
+- vision 정확도 5mm + 학습 align threshold 10mm = 합산 ~15mm
+- cell inner 16×6.5cm vs 박스 13.9×4.4cm → 여유 ±10mm 면 충분
+- 만약 vision noise 가 학습 분포 이상이면 → domain randomization 으로 재학습
+
+새 파일 이름 후보: `play_motion_chain_with_grasp_insert_camera.py` 또는 `play_motion_chain_camera.py`
+
+### 📋 Camera 통합 — 시작점
+
+기존 `play_motion_chain_with_grasp_insert.py` 복사 후:
+1. `MotionSceneCfg` 에 camera 추가:
+   ```python
+   from isaaclab.sensors import CameraCfg
+   camera = CameraCfg(
+       prim_path="{ENV_REGEX_NS}/Camera",
+       update_period=1.0/60.0,
+       height=480, width=640,
+       data_types=["rgb", "depth", "instance_segmentation_fast"],
+       offset=CameraCfg.OffsetCfg(pos=(0.5, 0.0, 1.0), rot=(...), convention="opengl"),
+   )
+   ```
+2. detection 모듈 (YOLO 또는 segmentation mask 직접) 추가
+3. world coord 변환 — IsaacLab `Camera` 의 intrinsic + extrinsic 사용
+4. 변환 결과를 stage_rl_grasp / stage_rl_insert 의 obs (box_xy_env, cell_xy_env) 에 입력
 
 ---
 
 ## 1. 한 줄 요약
 
-example7/example7_2 의 RL 단독 학습이 박스 적재에서 실패 (2~3M step에도 success 0)
-→ 큰 운동(reach/transport/retract)은 **motion planning**, contact-rich(grasp / insert)만 **RL** 로 분해 재설계.
-
-**현재 진행**: ✅ Step 1 (motion-only 5단계 pipeline) 완료. 박스 1개 잡고 셀 1개에 적재 OK. 다음은 Step 2 (Grasp RL env) 부터.
+example7/example7_2 의 RL 단독 학습이 박스 적재에서 실패 → 큰 운동 (reach/transport/retract) 은 **motion planning**, contact-rich (grasp / insert) 만 **RL** 로 분해 재설계.
 
 ---
 
-## 2. 현재 작동하는 코드 / 핵심 파라미터
+## 2. 진행 체크리스트 (현재 시점, 2026-05-10)
 
-### 파일
-- [scripts/play_motion_chain.py](scripts/play_motion_chain.py) — single-file motion-only pipeline (RL 미사용)
+- [x] **Step 1**: motion-only 6단계 chain — 검증 완료
+- [x] **Step 2**: Grasp RL — 1M step (실제). success_recent 1~3%. play 단독 OK, chain 에서도 stage 2 SUCCESS @ step 50 (잘 작동)
+- [x] **chain + grasp 통합** — 작동 OK
+- [x] **Step 3 — Insert RL**: 학습 끝 (v14)
+  - [x] env / cfg / scripts 작성
+  - [x] dataset 재수집 4번 (v1 → v6_clean = 769 sample, cell ±5cm + transport 끝 ee 3~5cm noise + 박스 / cell 위치 0.30, -0.30)
+  - [x] 학습 v1~v14 진행 — 자세히 § 12 timeline
+  - [x] **v14 best (4M)**: success_recent 1~3%, ep_rew_mean +880, SPS 8925
+  - [x] play_insert.py 단독 시각화 — **정렬 OK**
+  - [⚠️] chain runner 시각화 — **정렬 안 됨 (root cause 불명)**
+- [⚙️] **Step 4 — Chain runner** ([play_motion_chain_with_grasp_insert.py](scripts/play_motion_chain_with_grasp_insert.py))
+  - [x] 작성 완료 (cell wall 4개 RigidObjectCfg + kinematic random pose, sim_dt 1/60 + DECIMATION 1)
+  - [⚠️] stage 4 RL inference 안 됨. play_insert.py 와 같은 ckpt 인데 chain 에서만 정책이 잘못된 방향
+- [⚙️] **Step 7 — Sim2real (Camera vision)**: **다음 작업** ← 사용자 요청
+  - [ ] camera 붙인 새 chain runner 파일 생성
+  - [ ] detection (YOLO 또는 simple mask)
+  - [ ] vision 결과를 RL obs 에 입력
+- [ ] **Step 5**: Multi-box / 3×3 grid 확장 (Step 7 이후)
+- [ ] **Step 6**: 모듈화
 
-### 실행
+---
+
+## 3. 작성된 파일 — 위치 + 핵심 내용
+
+### Motion-only (Step 1) ✅
+| 파일 | 핵심 |
+|---|---|
+| [scripts/play_motion_chain.py](scripts/play_motion_chain.py) | 6단계 motion chain. RL 미사용. 사용자가 검증 OK |
+
+### Grasp RL (Step 2) ✅
+| 파일 | 핵심 |
+|---|---|
+| [tasks/grasp/grasp_env_cfg.py](tasks/grasp/grasp_env_cfg.py) | DirectRLEnvCfg. action 3 / state 6. cell randomize ±10cm + ±80°. tip_ratio 2.3 |
+| [tasks/grasp/grasp_env.py](tasks/grasp/grasp_env.py) | DirectRLEnv. IK + base_ee_quat (0,1,0,0) + R_z(yaw) |
+| [scripts/train_grasp.py](scripts/train_grasp.py) | PPO + VecNormalize + early_stop |
+| [scripts/play_grasp.py](scripts/play_grasp.py) | 시각화 |
+| `checkpoints/motion1_grasp.zip` + `_vecnorm.pkl` | **학습된 정책 — 사용 중. 재학습 전엔 그대로 둘 것** |
+
+### Chain + Grasp 통합 ✅
+| 파일 | 핵심 |
+|---|---|
+| [scripts/play_motion_chain_with_grasp.py](scripts/play_motion_chain_with_grasp.py) | chain 6단계. 단계 2 = 학습된 grasp PPO inference. 단계 3d = transport + ee yaw 점차 0 정렬 (slerp). 단계 4 는 아직 motion placeholder (1cm 정렬) |
+
+### Insert RL (Step 3) — 진행 중
+| 파일 | 핵심 |
+|---|---|
+| [scripts/collect_insert_handoff.py](scripts/collect_insert_handoff.py) | chain 시뮬 + 매 episode cell xy **±5cm** + cell yaw ±80° + **transport 끝 ee xy 3~5cm noise** (dataset 자체에 정렬 학습용 noise 포함). 50개 단위 부분 저장 |
+| [tasks/insert/insert_env_cfg.py](tasks/insert/insert_env_cfg.py) | DirectRLEnvCfg. action 3 / state 7. ee_fixed_z 0.26. **drop penalty 제거**. box_drop_z_threshold 0.12 (박스 long edge 누워도 검출) |
+| [tasks/insert/insert_env.py](tasks/insert/insert_env.py) | DirectRLEnv. **yaw 비누적**, **drop penalty 코드 제거**, `_extract_ee_yaw` helper, actual ee_ang_vel_z 사용. handoff dataset 그대로 적용 (reset noise 코드 제거) |
+| [scripts/train_insert.py](scripts/train_insert.py) | train_grasp.py 패턴 그대로 |
+| [scripts/play_insert.py](scripts/play_insert.py) | play_grasp.py 패턴. + **cell 4 walls visual marker** (회색, 정렬 목표 표시), keep_alive (창 자동 안 닫힘), render_interval 4 |
+| [scripts/play_motion_chain_with_grasp_insert.py](scripts/play_motion_chain_with_grasp_insert.py) | **Step 4 chain runner — 작성 완료**. cell wall 4개 kinematic RigidObject (random pose 강제 이동). stage 2 = grasp PPO, stage 4 = insert PPO. transport 끝 ee yaw → cell_yaw 회전 |
+| `checkpoints/insert_handoff_states.npz` | **dataset v3 재수집 중** (cell ±5cm + transport noise 포함, 1000 row) |
+| `checkpoints/insert_handoff_states_v1.npz` | v1 백업 (cell ±2cm, noise 없음 — dead) |
+
+### 향후 (작성 예정)
+| 파일 | 언제 |
+|---|---|
+| `tasks/grid/` | Step 5 — 3×3 grid 확장 |
+
+---
+
+## 4. 사용자가 확정한 디자인 결정
+
+### Insert RL Task (Step 3)
+| 항목 | 값 |
+|---|---|
+| Action (3) | Δx, Δy, Δyaw (cartesian relative, **둘 다 비누적**) |
+| **State (7)** | **slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping, ee_vel_x, ee_vel_y, yaw_vel** (모두 actual ee 기준) |
+| ee_z 고정 | TRANSPORT_Z = **0.26** (= BOX_SPAWN[2] + 0.19) |
+| gripper | 박스 잡힌 상태 유지 (close cmd 0.8 × tip_ratio 2.3) |
+| 알고리즘 | PPO. 수렴 안 되면 SAC+HER 검토 |
+| episode_length | 5초 (300 step) |
+| success_hold_steps | 30 (= 0.5초) |
+| align threshold | xy < 5mm, yaw < ~2.86° (0.05 rad) |
+| Reward | xy_align(80) + yaw_align(5) + smooth(0.01) + success_step(50) + success_lump(5000) (drop_penalty **제거**) |
+| is_grasping 판정 | finger center ↔ box dist < 7cm AND box z > **12cm** (drop threshold 0.12) |
+
+### Insert 시작 분포 (handoff dataset 자체에 noise 포함, 2026-05-09 변경)
+| 항목 | 범위 |
+|---|---|
+| cell base | x=0.21, y=-0.45 |
+| cell xy noise (매 episode) | **±5cm** (robot reach 안전 — ±10cm 시 IK 발산) |
+| cell yaw range | **±80°** (≈±1.396 rad) |
+| **transport 끝 ee xy noise** | **3~5cm random distance + random direction** (collect 시 transport_pos = cell + offset 으로 dataset 자체에 포함) |
+| 박스 spawn (collect 시) | xy ±10cm, yaw ±80° (grasp 학습 cfg 와 동일) |
+
+⚠️ 이전엔 `insert_env._reset_idx` 에서 reset noise 추가 시도했으나 **첫 `_pre_physics_step` 에서 덮어써져 무용지물**. 그래서 dataset 자체에 noise 포함 시키는 방식으로 변경 (collect_insert_handoff.py 수정).
+
+### Reward 가중치 (2026-05-09 변경)
+| 항목 | 값 |
+|---|---|
+| `r_xy_align` | exp(-80 × xy_dist²) × is_grasping |
+| `r_yaw_align` | exp(-5 × yaw_err²) × is_grasping |
+| `r_smooth` | -0.01 × (vel² 합) |
+| `r_success` | aligned 매 step bonus 50 (× is_grasping) |
+| `r_success_lump` | success terminate 시 5000 |
+| ~~`r_drop`~~ | **제거됨** (termination 만으로 자연 페널티. 사용자 스타일 — all-positive reward 선호) |
+
+drop 발생 시 `_get_dones` 의 `dropped → terminated` 으로 episode 즉시 종료 (남은 시간 reward 0 으로 자연 페널티).
+
+### Action scale (grasp / insert 동일)
+- Δxy: 10mm/step (= action × 0.01)
+- Δyaw: ~2.86°/step (= action × 0.05)
+
+### Action / State 일반 원칙 (사용자 RL 설계)
+- Action 은 cartesian Δxyz (+yaw) 만. 관절 각도는 IK 라이브러리로 변환
+- State 는 task 별로 직접 판단해서 단순하게
+- **Insert state 에 holding_box 플래그 필수**
+- **Insert: yaw 도 비누적 (xy 와 동일 패턴)** — `_pre_physics_step` 에서 매 step `cur_ee_yaw + Δyaw` 로 재계산. obs/reward/done 모두 actual ee yaw 기반 (`_extract_ee_yaw()`). 2026-05-09 변경.
+
+---
+
+## 5. 핵심 검증된 디자인 결정 (변경 X)
+
+### Motion-only / chain 공통
+- **환경 base**: `SimulationContext` + `InteractiveScene` (DirectRLEnv 안 씀)
+- **IK**: Isaac Lab `DifferentialIKController` (DLS). PinkIK / cuRobo 는 sim2real 단계로 미룸
+- **EE 정의**: 양 finger body (`rh_p12_rn_l2`, `rh_p12_rn_r2`) **월드 좌표 평균**
+- **EE base quat**: `(0, 1, 0, 0)` hardcoded (수직 아래 + finger Y) + R_z(yaw)
+- **Reach quat slerp**: home_quat → ee_quat_target (점진적 회전, IK 안정)
+- **Gripper**: arm 6 + gripper 4 joint position 직접 명령. tip_ratio = **2.3** (l2/r2 = l1/r1 × 2.3)
+- **friction**: combine_mode="max", static/dynamic = 3.0
+- **모든 main 끝**: `os._exit(0)` 강제 종료 (PhysX 자원 해제 hang 방지)
+
+### 실행 환경
+- Conda env: `env_isaaclab` (`/home/jaewoo/miniconda3/envs/env_isaaclab/`)
+- 활성화: `source ~/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab`
+- 그 후 `./isaaclab.sh -p source/motion1/scripts/...`
+
+---
+
+## 6. 알려진 이슈 / 주의사항
+
+1. **OMY USD mimic 깨짐** — 4 gripper joint 같은 명령 시 끝점이 부족하게 굽음. **tip_ratio 2.3** 으로 보정 (l2/r2 = l1/r1 × 2.3)
+2. **OMY arm reach 한계** — LIFT_Z 0.50 이상 singularity 떨림. 현재 0.26~0.30 안전
+3. **finger sep open = 11.3cm < 박스 long edge 13.9cm** — long edge grasp 물리적 불가능. **short edge Y(4.4cm) 만** 잡기
+4. **OMY USD 절대경로** 하드코딩 (`/home/jaewoo/IsaacLab/source/omy_f3m_urdf/OMY.usd`)
+5. **joint2 시각적 변동** — home (joint2=-1.55) ↔ grasp (joint2=0.06) 차이 큼. reach 시 큰 회전. **시각적**이지 실제 동작/dataset 수집/학습에는 영향 없음. sim2real 단계에서 PinkIK / 시작 자세 변경 검토
+6. **`robotis_lab` 패키지** 가 IsaacLab 안에 이미 설치되어 있음 (`/home/jaewoo/IsaacLab/robotis_lab/`). 공식 OMY USD + cfg 보유. stiffness 만 다름 (우리 350 vs 공식 120)
+7. **OMY-F3M spec**: reach 580mm, payload 3kg, joint 1/2/4/5/6 ±360°, **joint 3 ±150°** (URDF 는 ±360° 잘못 — sim2real 시 좁힘)
+8. **Cell xy noise reach 한계** (2026-05-09): cell base (0.21, -0.45) 에서 cell xy ±10cm 면 최악 (0.31, -0.55) → 원점 거리 0.63m > reach 0.58m → IK 발산 → collect 무한 루프. **cell xy ±5cm 까지 안전**.
+9. **collect 시 print buffer 갇힘** — 1000 sample 도달 후 `np.savez` 는 정상 저장되지만 `saved` print 가 buffer 에 갇혀 log 에 안 보임. 파일 timestamp 로 저장 여부 확인.
+
+### Background process 주의
+- 학습 / 수집 background 진행 중일 때 두 번째 instance 띄우면 GPU 충돌
+- 이전 conversation 의 background 가 잔존할 수 있음 — `ps -ef | grep python` 으로 확인
+
+---
+
+## 7. 실행 명령 모음
+
+### 1. Motion-only chain (검증 완료)
 ```bash
-./isaaclab.sh -p source/motion1/scripts/play_motion_chain.py
-./isaaclab.sh -p source/motion1/scripts/play_motion_chain.py --gripper_close 0.8 --hold_s 30
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain.py --hold_s 30
 ./isaaclab.sh -p source/motion1/scripts/play_motion_chain.py --headless --repeat 3
 ```
 
-### 검증된 파라미터 (현재 작동)
+### 2. Grasp RL (학습 완료, 시각화만)
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_grasp.py --episodes 10
+```
 
-| 변수 | 값 | 의미 |
-|---|---|---|
-| `BOX_SPAWN` | (0.45, -0.10, 0.07) | 박스 중심 위치. z=0.07 = 박스 바닥 ground 위 1.1cm |
-| `BOX_SPAWN_ROT` | (1, 0, 0, 0) | 박스 yaw=0 (회전 없음) |
-| `PRE_GRASP_Z` | BOX_SPAWN[2] + 0.06 = 0.13 | reach 끝 — 박스 위 6cm |
-| `GRASP_Z` | BOX_SPAWN[2] + 0.06 = 0.13 | 박스 잡는 z (현재는 PRE_GRASP_Z 와 동일 — descend 안 함) |
-| `LIFT_Z` | 0.30 | 들어올린 후 z |
-| `TRANSPORT_Z` | 0.25 | 셀 위 도달 z (insert 시작점) |
-| `PLACE_Z` | BOX_SPAWN[2] + 0.10 = 0.17 | release 시 EE z (insert 최종, 자유낙하 11cm) |
-| `RETRACT_Z` | 0.25 | retract 위로 z |
-| `--gripper_close` (default) | 0.8 rad | 박스 잡는 grip cmd. tip ratio 2.3 적용 |
-| friction | static/dynamic = 3.0, combine = "max" | 박스 슬립 방지 |
+### 3. Chain + Grasp 통합 (검증 완료)
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp.py --hold_s 30
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp.py --repeat 5 --hold_s 5
+```
 
-### 핵심 디자인 결정 (검증 후 확정)
+### 4. Insert dataset 수집
+```bash
+# GUI 검증 (작은 수)
+./isaaclab.sh -p source/motion1/scripts/collect_insert_handoff.py --target 5 --hold_s 30
 
-| 항목 | 결정 | 이유 |
-|---|---|---|
-| 환경 base | standalone (`SimulationContext` + `InteractiveScene`) | RL 단계와 분리, DirectRLEnv 안 씀 |
-| IK 라이브러리 | Isaac Lab `DifferentialIKController` (dls) | jacobian 기반, 양 finger 평균 jacobian 사용 |
-| EE / grip center | finger body `rh_p12_rn_l2` + `rh_p12_rn_r2` **월드 좌표 평균** | mimic 깨진 finger 의 안정적인 ee 정의 |
-| EE target quat | **`(0, 1, 0, 0)` hardcoded** (180° around world X) | 수직 아래 + finger Y 양옆. URDF 분석 + 시도 결과 확정 |
-| Reach quat | **slerp** (home_quat → target_quat) | reach 도중 회전을 점진적으로 풀어 IK 안정 |
-| 그리퍼 action | RL action 매핑 무시. **arm 6 + gripper 4 joint position 직접 명령** | mimic 깨짐 → 코드 레벨 강제 |
-| Gripper tip ratio | **기저 (l1/r1) : 끝점 (l2/r2) = 1 : 2.3** | example7 fallback 자세 분석. finger 끝점이 더 굽혀져 안쪽 모임 |
-| 박스 yaw spawn | **0 (회전 없음)** | RL 단계에서 randomize 예정 |
-| Trajectory 보간 | cartesian 직선 + 매 step IK | 자연스럽고 직선 보장 |
+# 본격 수집 (background, 약 30분~1시간)
+./isaaclab.sh -p source/motion1/scripts/collect_insert_handoff.py --headless --target 1000 --hold_s 0
+# → /tmp/collect_insert*.log
+# 50개 단위 부분 저장 (stuck 대비)
+```
 
----
+### 5. Insert RL 학습 (수집 끝나면 즉시)
+```bash
+# 신규 학습 (약 3분 — SPS 6000+)
+./isaaclab.sh -p source/motion1/scripts/train_insert.py --headless --num_envs 128 --timesteps 1000000
 
-## 3. 박스 / 셀 / 로봇 사양
+# resume
+./isaaclab.sh -p source/motion1/scripts/train_insert.py --headless --resume --timesteps 500000
 
-### 박스
-- 크기 (m): 0.139(x) × 0.044(y) × 0.118(z)
-- long edge X(13.9cm) > finger sep open(11.3cm) → **long edge 잡기 불가능**, **short edge Y 잡기만 가능**
-- 질량: 0.3 kg
-- friction = 3.0 (combine_mode="max")
+# tensorboard (다른 터미널)
+tensorboard --logdir source/motion1/logs/insert
+```
 
-### 셀 (1×1)
-- 셀 내부 (m): 0.16(x) × 0.065(y)
-- 격벽: 두께 0.008, 높이 0.12
-- 셀 중심 (env-rel): (0.25, -0.45, 0.0)
+### 6. Insert 시각화 (cell 4 walls visual + keep_alive)
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_insert.py
+./isaaclab.sh -p source/motion1/scripts/play_insert.py \
+    --checkpoint checkpoints/motion1_insert_best.zip \
+    --vecnorm checkpoints/motion1_insert_best_vecnorm.pkl
+```
 
-### OMY 로봇
-- USD: `/home/jaewoo/IsaacLab/source/omy_f3m_urdf/OMY.usd`
-- arm joints: `joint1` ~ `joint6`
-- gripper joints: `rh_r1_joint`, `rh_r2`, `rh_l1`, `rh_l2` (mimic 깨짐 → 코드 레벨 비율 명령)
-- finger bodies: `rh_p12_rn_l2`, `rh_p12_rn_r2`
-- URDF 분석: `rh_p12_rn_*2` body 의 local frame 은 parent (`rh_p12_rn_*1`) 와 동일 (rpy=0). finger sep = 부모 local Y 축, gripper close 회전축 = 부모 local X.
+### 7. Chain runner — motion + grasp + insert 통합 (Step 4)
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp_insert.py --hold_s 30
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp_insert.py --repeat 5 --hold_s 5
+# → 박스 + cell 모두 random, grasp PPO + insert PPO inference, cell yaw 정렬 transport
+```
 
 ---
 
-## 4. 5단계 motion-only 파이프라인 (현재 작동)
+## 8. 사용자 스타일 메모
 
-| 단계 | 동작 | 비고 |
-|---|---|---|
-| 1. Reach | home → pre_grasp(z=0.13) | quat slerp 로 home_quat → (0,1,0,0) 점진적 회전 |
-| 2. Grasp | pre_grasp → grasp(z=0.13) → close(0.8 rad) → hold | tip ratio 2.3 으로 finger 끝점 추가 굽힘 |
-| 3. Transport | grasp → lift(z=0.30) → transport(z=0.25) | gripper closed 유지 |
-| 4. Place | transport → place(z=0.17) → gripper open | release 후 박스 11cm 자유낙하 → 셀 안착 |
-| 5. Retract | place → retract(z=0.25) → home | gripper open 유지 |
-
-각 stage 끝에 `SETTLE_S = 0.8s` hold (IK 수렴). repeat 옵션 + finite hold (`--hold_s`) 로 좀비 프로세스 없음.
-
----
-
-## 5. 알려진 제약 / 주의사항
-
-1. **OMY USD mimic 깨짐** → 4 gripper joint 같은 값 명령 시 끝점 link 가 부족하게 굽음. **tip_ratio = 2.3** 으로 보정 ([play_motion_chain.py:377-383](scripts/play_motion_chain.py#L377))
-2. **OMY arm reach 한계** → LIFT_Z 0.50 이상이면 singularity 근처에서 EE 떨림. 현재 LIFT_Z=0.30 로 안전하게 운영
-3. **finger sep open = 11.3cm < 박스 long edge 13.9cm** → 박스 long edge 양옆 grasp 물리적 불가능. short edge Y 만 가능
-4. **OMY USD 절대경로 하드코딩** (`/home/jaewoo/IsaacLab/source/omy_f3m_urdf/OMY.usd`)
-5. **자동 재시작 주의** — 옛날 Claude session 이 background bash 로 motion1 을 자동 재실행한 사례 있음. session 잘 정리할 것
-
----
-
-## 6. 다음에 할 일 (Step 2 부터)
-
-### Step 2 — Grasp RL env (예상 1~2시간 + 학습 30분~1시간)
-
-**목표**: 박스 위 5cm 도달한 자세에서 시작 → close 명령 + 미세 위치 조정으로 박스 잡기. motion planner 가 reach 끝낸 자세 randomize 흡수.
-
-**파일**:
-- `tasks/grasp/grasp_env.py` (DirectRLEnv 상속, example7 골격 참고)
-- `tasks/grasp/grasp_env_cfg.py`
-- `scripts/train_grasp.py` (SAC, num_envs=64)
-- `scripts/play_grasp.py`
-
-**Action**: cartesian Δxyz 3차원 + gripper 1 = 4. 관절 각도는 IK 로 변환 (motion1 RL 설계 원칙).
-
-**State** (~20 dim):
-- arm joint pos/vel (12)
-- gripper close state (1)
-- ee_pos rel (3)
-- box_pos rel (3)
-- ee → box 벡터 (3)
-
-**Reward** (단순):
-- `r_approach = exp(-50 * dist(ee, box)²)`
-- `r_grip_close = (gripper_close > 0.5).float()`
-- `r_grasp_success = 박스 z > 시작 z + 1cm AND grip closed AND box near grip`
-- 가중치: 5 / 3 / 50
-
-**시작 상태 randomize**:
-- 박스 spawn 위치 ±2cm
-- ee 시작 자세 = 박스 위 5cm + 약간의 랜덤 (±1~2cm)
-
-**검증**: 박스 1cm 살짝 들기 success rate ≥ 90%.
-
----
-
-### Step 3 — Insert RL env (예상 1~2시간 + 학습 1시간)
-
-**목표**: 박스 잡힌 채 셀 위 5cm 도달한 자세에서 시작 → 정렬 + 셀 안 삽입 + release.
-
-**파일**:
-- `tasks/insert/insert_env.py` (HER GoalEnv 형식)
-- `tasks/insert/insert_env_cfg.py`
-- `scripts/train_insert.py` (SAC + HER, num_envs=64)
-- `scripts/play_insert.py`
-
-**Action**: cartesian Δxyz + gripper = 4 차원.
-
-**State** (~25 dim, GoalEnv):
-- core: arm joint pos/vel (12), gripper close (1), ee_pos rel (3), box_pos rel (3), box_quat (4)
-- **`holding_box` 플래그 (1)** — 그리퍼-박스 거리 또는 contact 기반 binary. **필수** (motion1 RL 설계 원칙).
-- achieved_goal: box xy + endpoint xy (yaw 표현)
-- desired_goal: 셀 중심 xy + 고정 endpoint
-
-**Reward**:
-- `r_xy_keep = exp(-100 * xy_dist²)`
-- `r_yaw = exp(-100 * endpoint_diff²)`
-- `r_descent = where(xy_aligned & yaw_aligned, exp(-30*(z-0.06)²), 0)`
-- `r_release = (deep_enough & grip_open).float()`
-- `r_success = (in_cell & on_floor & yaw_aligned).float()`
-
-**시작 상태**:
-- handoff: motion1 chain 의 transport 끝 자세 (셀 위 5cm, 박스 잡힌 상태)
-- 박스 yaw randomize ±30°, xy ±2cm
-
-**검증**: 셀 안 정렬 + 삽입 + release success rate ≥ 70%.
-
----
-
-### Step 4 — Chain Runner (motion + RL 통합)
-
-**파일**: `chain/chain_runner.py`, `scripts/play_chain.py`
-
-**시퀀스**:
-1. **Reach** — motion plan (현재 motion1 의 stage 1)
-2. **Grasp** — RL policy (Step 2 학습된 정책)
-3. **Transport** — motion plan (현재 motion1 의 stage 3)
-4. **Place + Insert** — RL policy (Step 3 학습된 정책)
-5. **Retract** — motion plan (현재 motion1 의 stage 5)
-
-각 단계 전환 조건: 다음 단계 시작 가능한 상태 충족 시 (예: grasp 성공 신호 + 정해진 ee 위치).
-
-**검증**: 박스 1개 적재 success rate ≥ 70%.
-
----
-
-### Step 5 — Multi-box / 3×3 grid 확장
-
-- 박스 N 개 + 셀 N 개 (PLAN.md 의 3×3 grid 모듈 추가)
-- box → cell 매핑 (row-major 또는 randomize)
-- chain runner 에 `run_all()` 추가 (PLAN.md 4.4 참고)
-
-**검증**: 3 박스 적재 success rate ≥ 70%.
-
----
-
-### Step 6 (옵션) — 모듈화
-
-`scripts/play_motion_chain.py` single-file → PLAN.md 의 모듈 구조 (`motion/`, `chain/`, `tasks/`) 로 분리.
-
----
-
-### Step 7 (멀리) — Sim2real
-
-- ground truth pose → YOLO 카메라 vision pipeline 으로 교체
-- handoff randomization 강화
-- example7 의 sim2real 계획 ([memory/project_simreal_plan.md](../../../.claude/projects/-home-jaewoo-IsaacLab/memory/project_simreal_plan.md)) 참고
-
----
-
-## 7. 환경 정보
-
-- Conda env: `env_isaaclab` (`/home/jaewoo/miniconda3/envs/env_isaaclab/`)
-- 실행 활성화: `conda activate env_isaaclab` 후 `./isaaclab.sh -p ...`
-- GUI 디버깅: 옵션 안 줌 (default)
-- headless 학습: `--headless --num_envs 64`
-
----
-
-## 8. 절대 건드리지 말 것
-
-- `source/example5/` (frozen lift policy)
-- `checkpoints/example5.zip`, `checkpoints/example5_vecnorm.pkl`, `checkpoints/handoff_states.npz`
-- `source/omy_f3m_urdf/OMY.usd` (로봇 모델)
-
----
-
-## 9. 사용자 스타일 메모
-
-- 한국어로 설명 선호
+- 한국어 설명 선호
 - 코드 변경 후 즉시 시각화로 검증 원함 (`--hold_s` 옵션 활용)
 - 페널티 (음수 reward) 회피, all-positive reward 선호
-- RL 가중치 1~100 범위
+- 가중치 1~100 범위 (큰 값 회피, 단 success_lump 5000 OK)
 - 학습 200k~2M step 범위
-- 코드 직접 수정해서 시도하는 편 — 작은 단위로 변경 → 사진/log 공유
+- "마음대로 해" / "필요한 라이브러리 다 가져다 써" 위임 자주
+- chain 검증 우선 → sim2real 은 Step 7 으로 미룸 (PinkIK / cuRobo 검토)
 
 ---
 
-## 10. 진행 체크리스트
+## 9. 절대 건드리지 말 것
 
-- [x] PLAN.md 작성 / 사용자 confirm
-- [x] CLAUDE.md (이 파일) 작성
-- [x] 폴더 구조 생성
-- [x] `scripts/play_motion_chain.py` prototype 작성
-- [x] GUI 로 5 단계 작동 검증 (gripper close / friction / tip ratio / target quat / lift z 모두 튜닝 완료)
-- [ ] **다음**: Step 2 — `tasks/grasp/grasp_env.py` 작성 (Grasp RL env)
-- [ ] Step 3 — `tasks/insert/insert_env.py` (Insert RL env, holding_box state 필수)
-- [ ] Step 4 — `chain/chain_runner.py` (motion + RL 통합)
-- [ ] Step 5 — multi-box / 3×3 grid 확장
-- [ ] Step 6 — 모듈화 (single-file → motion/, chain/, tasks/)
-- [ ] Step 7 — sim2real (vision, YOLO 통합)
+- `source/example5/` (frozen lift policy)
+- `source/omy_f3m_urdf/OMY.usd` (로봇 모델 그대로)
+- `checkpoints/example5.zip`, `example5_vecnorm.pkl`, `handoff_states.npz` (example5 전용)
+- `checkpoints/motion1_grasp.zip` + `_vecnorm.pkl` (학습된 grasp 정책 — 재학습 전엔 그대로)
+- `robotis_lab/` 폴더 (ROBOTIS 공식 패키지, 참고용)
+
+---
+
+## 10. 다음 Claude 세션 — 정확한 진행 가이드
+
+### Step A: 진행 상태 확인
+```bash
+ps -ef | grep -E "collect_insert|train_insert" | grep -v grep   # 프로세스 살아있는지
+tail -10 /tmp/collect_insert_v3.log    # 또는 v4 등 최신 log
+ls -la checkpoints/insert_handoff_states.npz   # 파일 timestamp
+ls -la checkpoints/motion1_insert.zip          # 학습 결과
+```
+
+### Step B: dataset 완료 후 학습
+```bash
+# 기존 ckpt 백업 (env 변경 후 fresh 학습 시)
+mv checkpoints/motion1_insert.zip checkpoints/motion1_insert_v2.zip
+mv checkpoints/motion1_insert_vecnorm.pkl checkpoints/motion1_insert_v2_vecnorm.pkl
+mv checkpoints/motion1_insert_best.zip checkpoints/motion1_insert_v2_best.zip
+mv checkpoints/motion1_insert_best_vecnorm.pkl checkpoints/motion1_insert_v2_best_vecnorm.pkl
+
+./isaaclab.sh -p source/motion1/scripts/train_insert.py \
+    --headless --num_envs 128 --timesteps 1000000
+```
+- 학습 시간: 약 3분 (SPS 6000+)
+- log: `/tmp/train_insert_v3.log` 같은 곳
+- checkpoint: `checkpoints/motion1_insert.zip`
+
+### Step C: 학습 결과 시각화
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_insert.py
+```
+- cell 4 walls visual (회색) 보임
+- keep_alive=True (창 자동 안 닫힘)
+- 정렬 행동 + reset 동작 직접 확인
+
+### Step D: chain runner 검증 (Step 4)
+```bash
+./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp_insert.py --hold_s 30 --repeat 5
+```
+- 박스 + cell 모두 random spawn
+- grasp PPO (단계 2) + insert PPO (단계 4) inference
+- transport 끝 ee yaw → cell_yaw 정렬
+- success rate 보고 다음 결정
+
+### Step E: success rate 따라 결정
+- **chain success rate ≥ 0.5**: ✅ Step 5 (multi-box / 3×3 grid) 진행
+- **chain success rate < 0.3**: ❌ insert RL 추가 학습 또는 dataset 분포 재검토 (cell 범위, transport noise 등)
+- **stuck**: SAC + HER 로 algorithm 전환 (사용자가 이전에 명시한 대안)
+
+### Step F: Step 5 multi-box / 3×3 grid 확장
+- `tasks/grid/` 새 폴더
+- chain runner 가 박스 9개 / cell 9개 처리
+- 박스 마다 grasp + insert inference
+
+---
+
+## 11. 핵심 환경 정보 (cheatsheet)
+
+```
+Conda env       : env_isaaclab (/home/jaewoo/miniconda3/envs/env_isaaclab/)
+Activate        : source ~/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
+Run script      : ./isaaclab.sh -p source/motion1/scripts/<파일.py> [opts]
+
+GPU             : RTX 4070 12GB
+RL 학습 사용량  : num_envs 128 → ~3GB (충분)
+
+Box / Cell coordinates (env-rel) — 2026-05-10 변경:
+  BOX_SPAWN     = (0.30, -0.10, 0.07)
+  CELL_CENTER   = (0.30, -0.30, 0.0)
+  CELL_SPAWN_XY_NOISE = 0.05  (±5cm)
+  CELL_SPAWN_YAW_MAX  = 1.396 (±80°)
+  BOX_SPAWN_XY_NOISE  = 0.10  (±10cm) (chain runner 에서는 0 으로 fixed 시도 가능)
+  PRE_GRASP_Z   = 0.17
+  GRASP_Z       = 0.115
+  TRANSPORT_Z   = 0.26
+  PLACE_Z       = 0.165
+
+Insert RL — 2026-05-10 cfg:
+  action_scale_xy   = 0.005  (5mm/step) — fine 정렬용
+  action_scale_yaw  = 0.05
+  ee_fixed_z        = 0.26
+  align_xy_threshold = 0.010 (10mm)
+  align_yaw_threshold = 0.087 (~5°)
+  success_hold_steps = 15 (0.25초)
+  reward_xy_align_gain        = 80.0  (exploration)
+  reward_xy_align_gain_close  = 200.0 (정밀 정렬, dual reward)
+  reward_yaw_align_gain       = 5.0
+  reward_success_bonus        = 50.0 (aligned 매 step)
+  reward_success_lump         = 5000.0 (success terminate)
+  is_grasping mask            = 제거 (grasp env 와 동일)
+  drop penalty                = 제거 (termination 만으로 자연 페널티)
+  sim_dt = 1/60, decimation = 1, control rate 60Hz
+  yaw 비누적 (xy 와 동일 패턴, _extract_ee_yaw 사용)
+
+OMY:
+  arm joints    : joint1~6
+  gripper joints: rh_r1_joint, rh_r2, rh_l1, rh_l2 (mimic 깨짐, tip_ratio 2.3)
+  finger bodies : rh_p12_rn_l2, rh_p12_rn_r2 (월드 좌표 평균 = grip center)
+
+EE base quat (수직 아래) : (0, 1, 0, 0) (w, x, y, z) - hardcoded
+EE target quat = R_z(ee_yaw) ⊗ base_ee_quat
+```
+
+---
+
+## 12. Insert RL 학습 timeline (2026-05-09 ~ 2026-05-10)
+
+| ver | dataset | cfg 변경 | 결과 (success_recent) |
+|-----|---------|---------|---------------------|
+| v1  | dirty (cell ±2cm, noise 없음) | yaw 누적 + drop penalty 100 | 0% |
+| v2  | dirty (v1 dataset) | **yaw 비누적** + **drop penalty 제거** | 0% (dataset noise 부재가 진짜 원인) |
+| v3  | v3_dirty (cell ±5cm + transport noise 3~5cm 추가) | (v2 동일) | 0% (dataset 손상 20.5%) |
+| v4  | v3_clean (769 sample, 손상 sample filter) | 동일, **2M step** | 0% |
+| v5/6/7 dataset | (재수집 시도들) | — | — |
+| v6_clean | dataset 재수집 (박스/cell 0.30,-0.30 가까이, cell ±5cm + transport 3~5cm) | — | — |
+| v6  | v6_clean (769 sample) | (v4 동일) | 0% |
+| v7  | v6_clean | **align threshold 완화** (5mm→10mm, 2.86°→5°, hold 30→15) | 1% |
+| v8  | v6_clean | v7 + 2M resume = **누적 4M** | 2% |
+| v9  | v6_clean | v8 + 2M resume = **누적 6M** | 1~2% (정체) |
+| v10 | v6_clean | v8 fresh + **action 5mm** + reward gain 200 (단독, 2M) | 0% (gain 200 너무 sharp) |
+| v11 | v6_clean | action 5mm + gain 80 (4M) | 0~1% |
+| v12 | v6_clean | v11 + **is_grasping mask 제거** (4M) | 0~1%, r_xy_align 0.92 |
+| v13 | v6_clean | v12 + **dual reward** (gain 80 + 200, 4M, sim_dt 1/120) | 1%, 진단 metric 추가 |
+| v14 | v6_clean | **sim_dt 1/120 → 1/60 + decimation 1** (4M) | **1~3%** ← 현재 best |
+
+핵심 발견:
+- v1→v2: yaw 비누적 + drop penalty 제거 → ep_rew_mean 큰 폭 ↑
+- v6→v7: align threshold 완화로 success terminate 가능
+- v11→v12: is_grasping mask 제거 → 학습 신호 5배 ↑ (xy_align reward 6배)
+- v13→v14: sim_dt 1/60 (chain runner 와 일치) → SPS 43% ↑ + success rate 2배 ↑
+
+진짜 bottleneck (v14 진단):
+- **is_grasping_rate 12%** (박스 86% 시간 떨어진 자세) ← 학습 환경 한계
+- xy_aligned 6%, yaw_aligned 75%, aligned (전체) 1.5%
+- ep_len 44.8 step (5초 max 의 15%) — drop 으로 짧게 termination
+- play_insert.py 단독 OK, **chain runner 에서만 안 됨** ← 미해결 미스터리
+
+ckpt 백업 위치 (절대 건드리지 말 것):
+- `motion1_insert_v1.zip` (1M dirty) ~ `motion1_insert_v9_6M.zip` (6M)
+- `motion1_insert_v10_5mm_g200.zip`, `motion1_insert_v11_5mm_g80_mask.zip`
+- `motion1_insert_v12_nomask.zip`, `motion1_insert_v13_dual.zip`
+- `motion1_insert_best.zip` (현재) = **v14 best (success_recent 1~3%)**
+
+---
+
+## 13. Camera 통합 (Step 7) — 다음 작업
+
+사용자 요청 — `play_motion_chain_with_grasp_insert.py` 의 camera 붙인 버전 만들기.
+
+### 작업 단계
+1. **camera sensor 부착** — IsaacLab `CameraCfg` 또는 USD 카메라
+2. **detection** — YOLO (`ultralytics`) 또는 segmentation mask 직접
+3. **image → world coord** — camera intrinsic + extrinsic
+4. **vision 결과를 RL obs 에** — 현재 ground truth 자리에 vision 추정값
+
+### 학습 영향 분석
+- 현재 정책 학습: ground truth obs (sim 의 정확한 cell_xy, box_xy)
+- vision noise 추정 (5mm) ≪ align threshold (10mm) → **현재 정책 그대로 사용 가능**
+- noise 더 크면 → domain randomization 으로 재학습
+
+### 시작점
+- 새 파일: `play_motion_chain_with_grasp_insert_camera.py` (이름 자유)
+- 기존 `play_motion_chain_with_grasp_insert.py` 복사 후 camera 추가
+- IsaacLab 의 Camera 예제: `source/standalone/...camera...py` 참고
+
+---
+
+## 14. 미해결 의문 — chain runner stage 4 안 되는 이유
+
+play_insert.py (학습 env) = OK, chain runner (SimulationContext + InteractiveScene) = X. 같은 ckpt + 같은 obs 식 + 같은 action 적용 식. 그런데 정책 행동 다름.
+
+알려진 차이 (모두 fix 했음):
+- ✅ VecNormalize 직접 호출 (sb3 의 `normalize_obs()` batch (1, 7))
+- ✅ action_scale_xy 분리 (grasp 0.01 / insert 0.005)
+- ✅ sim_dt 1/120 → 1/60 + decimation 1 (학습 cfg 일치)
+- ✅ cell wall collision off 시도 (효과 X)
+- ✅ insert offset 0.5~1cm (이전 3~5cm)
+
+**미해결 — 다음 세션에서 분석할 것**:
+- chain runner 의 stage 3d 끝 자세가 학습 시작 분포 와 정확히 같은가?
+- IK 정확도, settle 시간, ee_vel 잔여 차이?
+- obs 의 element 순서, dtype, 정규화 미묘한 차이?
+
+debug print 로 chain runner stage 4 첫 5 step 의 obs/action 출력 + play_insert.py 첫 5 step 비교 권장. 같은 obs 받으면 같은 action 출력 — 다르면 obs 가 진짜 다름.

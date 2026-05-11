@@ -1,13 +1,16 @@
-"""motion1 — Grasp RL env cfg.
+"""motion1 — Insert RL env cfg (v2: coded reset).
 
-Task: 박스 위 PRE_GRASP_Z 에서 xy/yaw 미세 정렬 (RL).
+Task: 박스 잡힌 채 셀 위에서 xy/yaw 미세 정렬 (RL).
 - Action (3): Δx, Δy, Δyaw (cartesian, relative)
-- State (6): obj_rel_x, obj_rel_y, obj_yaw_err, ee_vel_x, ee_vel_y, yaw_vel
+- State (7): slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping, ee_vel_x, ee_vel_y, yaw_vel
 - ee_z, gripper: 고정 (학습 안 함)
-- 박스 spawn: xy ±2cm, yaw ±80°
-- ee 시작: 박스 + 3~5cm random offset (xy 방향 random), yaw=0 고정
+- **시작 상태**: handoff dataset X. 코드로 직접 매핑.
+  - robot 을 cell + ee_dxy 위로 IK 이동
+  - 박스를 grip center 에 강제 매핑 (yaw = cell_yaw)
 
-motion-only pipeline 의 단계 2 (grasp 미세조정) 만 RL 로 학습.
+v1 (insert_env) 대비 변경:
+- handoff dataset 사용 X → 손상 sample 비율 0
+- 박스 정확히 손에 매핑 → is_grasping rate 보장
 """
 from __future__ import annotations
 
@@ -23,20 +26,17 @@ from source.omy.omy_robot_cfg import OMY_OFF_SELF_COLLISION_CFG
 
 
 @configclass
-class GraspEnvCfg(DirectRLEnvCfg):
-    """OMY Grasp 미세 정렬 RL Env cfg."""
+class InsertEnvV2Cfg(DirectRLEnvCfg):
+    """OMY Insert 미세 정렬 RL Env cfg (v2: coded reset)."""
 
     # =========================
     # 1. 기본 RL env 설정
     # =========================
-    decimation: int = 2          # 물리 120Hz, 제어 60Hz
-    episode_length_s: float = 5.0  # 정렬은 짧음 -> 이후 3초로 줄이기
+    decimation: int = 2
+    episode_length_s: float = 5.0
 
-    # action: Δx, Δy, Δyaw — 3차원 [-1, 1]
-    action_space: int = 3
-
-    # state: obj_rel_x, obj_rel_y, obj_yaw_err, ee_vel_x, ee_vel_y, yaw_vel — 6차원
-    observation_space: int = 6
+    action_space: int = 3       # Δx, Δy, Δyaw
+    observation_space: int = 7  # slot_rel_x/y, slot_yaw_err, is_grasping, ee_vel_x/y, yaw_vel
     state_space: int = 0
 
     # =========================
@@ -64,14 +64,14 @@ class GraspEnvCfg(DirectRLEnvCfg):
     )
 
     # =========================
-    # 4. Robot (motion-only 와 동일)
+    # 4. Robot (motion-only / grasp 와 동일)
     # =========================
     robot = OMY_OFF_SELF_COLLISION_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
 
     # =========================
-    # 5. Object — 박스 (motion-only 와 동일)
+    # 5. Object — 박스
     # =========================
     box: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
@@ -93,7 +93,7 @@ class GraspEnvCfg(DirectRLEnvCfg):
                 dynamic_friction=3.0,
             ),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, -0.10, 0.07)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.30, -0.10, 0.07)),
     )
 
     # =========================
@@ -113,59 +113,69 @@ class GraspEnvCfg(DirectRLEnvCfg):
     )
 
     # =========================
-    # 7. Grasp 정렬 task 파라미터
+    # 7. Insert task 파라미터
     # =========================
-    # ee 가 고정으로 유지하는 z (motion-only 의 PRE_GRASP_Z 와 동일)
-    ee_fixed_z: float = 0.17
+    # ee 가 고정으로 유지하는 z (= TRANSPORT_Z, 박스 spawn 위 19cm)
+    ee_fixed_z: float = 0.26
 
-    # 박스 spawn (env-rel)
-    box_spawn_xy: tuple[float, float] = (0.45, -0.10)
-    box_spawn_z: float = 0.07
-    box_spawn_xy_noise: float = 0.1      # 박스 생성 노이즈 ±10cm
-    box_spawn_yaw_max: float = 1.396     # 박스 생성 노이즈 ±80° (= 1.396 rad)
+    # 박스 매핑 z offset (grip center 에서 박스 center 까지)
+    # box thickness 0.118 / 2 = 0.059 — 박스 short edge Y 잡힘 → ee z 와 박스 center z 차이 약 0.06
+    box_z_offset: float = 0.06    # box_z = ee_fixed_z - 0.06 = 0.20
 
-    # ee 시작 (박스 + offset, motion-only 의 pre_grasp_offset 와 동일 발상)
-    ee_offset_min_m: float = 0.03         # 그립 생성 노이즈 박스로부터 최소 3cm
-    ee_offset_max_m: float = 0.05         # 그립 생성 노이즈 박스로부터 최대 5cm
-
-    # ee yaw clip — clip 안 하면 wrist 끝없이 회전
-    ee_yaw_min: float = -1.5708           # -π/2
-    ee_yaw_max: float = 1.5708            # +π/2
+    # ee yaw clip
+    ee_yaw_min: float = -1.5708       # -π/2
+    ee_yaw_max: float =  1.5708       # +π/2
 
     # =========================
-    # 8. Action scale (RL action [-1,1] → 실제 delta)
-    # 나중에 튜닝 가능 (5mm/step + 3°/step)
+    # 8. Reset 분포 (코드로 직접 random)
     # =========================
-    action_scale_xy: float = 0.01        # 10 mm / step
-    action_scale_yaw: float = 0.05        # ~2.86° / step
+    # cell base
+    cell_center_x: float = 0.30
+    cell_center_y: float = -0.30
+
+    # cell xy noise (매 episode)
+    cell_xy_noise: float = 0.05       # ±5cm
+
+    # cell yaw range
+    cell_yaw_max: float = 1.396       # ±80°
+
+    # ee 시작점 noise (cell 기준 random distance + direction)
+    ee_offset_min: float = 0.03       # 3cm
+    ee_offset_max: float = 0.05       # 5cm
+
+    # reset 시 IK 이동 step 수 (sim_dt = 1/120, 60 step = 0.5초)
+    reset_ik_settle_steps: int = 60
 
     # =========================
-    # 9. Reward 가중치
-    # 가까이 갔을 때 신호 강하도록 exp gain 부드럽게.
-    # 학습 안 되면 가중치 / gain 조정.
+    # 9. Action scale
     # =========================
-    reward_xy_align_gain: float = 80.0     # exp(-gain * xy_dist²)
-    reward_yaw_align_gain: float = 5.0       # exp(-gain * yaw_err²)
-    reward_smooth_w: float = 0.01            # -w * (vel² 합) — 부드러움 유도
-    reward_success_bonus: float = 50.0       # aligned 매 step 시 보너스 (정렬 유지 인센티브)
-    # success terminate (success_hold_steps 도달) 시 한 번에 받는 압도적 보너스.
-    # 목적: timeout 까지 헤매다 reward 누적하는 것보다 빨리 success terminate 가 이득이 되도록.
+    action_scale_xy: float = 0.01     # 10mm/step
+    action_scale_yaw: float = 0.05    # ~2.86°/step
+
+    # =========================
+    # 10. Reward 가중치
+    # all-positive (drop 은 termination 으로 자연 페널티)
+    # =========================
+    reward_xy_align_gain: float = 80.0
+    reward_yaw_align_gain: float = 5.0
+    reward_smooth_w: float = 0.01
+    reward_success_bonus: float = 50.0
     reward_success_lump: float = 5000.0
 
-    # =========================
-    # 10. 종료 조건
-    # =========================
-    align_xy_threshold: float = 0.005     # 5 mm 이내 → aligned
-    align_yaw_threshold: float = 0.05     # ~2.86° 이내 (3° 근사)
-    # aligned 상태로 N step 유지 시에만 success → terminate (잠깐 스쳐가는 케이스 방지)
-    success_hold_steps: int = 30          # 30 step = 0.5초 (60Hz)
-    # NOTE: 학습 초기엔 ee 시작 위치가 박스에서 멀어 (fallback pose 기준 ~20cm),
-    # fail_xy_threshold 가 너무 작으면 episode 가 1~3 step 에 끝나서 학습 안 됨.
-    # 우선 0.30 (30cm) 으로 크게 → 학습 진행 시 점차 줄이는 curriculum 고려.
-    fail_xy_threshold: float = 0.30       # ee 가 박스에서 30cm 이상 멀어지면 실패
+    # is_grasping 판정
+    grasping_dist_threshold: float = 0.07
+    box_drop_z_threshold: float = 0.12
 
     # =========================
-    # 11. 이름 매핑 (motion-only 와 동일)
+    # 11. 종료 조건
+    # =========================
+    align_xy_threshold: float = 0.010     # 10mm
+    align_yaw_threshold: float = 0.087    # ~5°
+    success_hold_steps: int = 15          # 0.25초
+    fail_xy_threshold: float = 0.30
+
+    # =========================
+    # 12. 이름 매핑
     # =========================
     left_finger_body_name: str = "rh_p12_rn_l2"
     right_finger_body_name: str = "rh_p12_rn_r2"
@@ -173,8 +183,12 @@ class GraspEnvCfg(DirectRLEnvCfg):
         "rh_r1_joint", "rh_r2", "rh_l1", "rh_l2",
     )
 
+    # gripper close cmd (박스 잡고 있는 상태 유지용)
+    gripper_close_cmd: float = 0.8
+    gripper_tip_ratio: float = 2.3
+
     # =========================
-    # 12. PPO 하이퍼파라미터 (간단 task 에 맞춤)
+    # 13. PPO 하이퍼파라미터
     # =========================
     n_steps: int = 1024
     batch_size: int = 256

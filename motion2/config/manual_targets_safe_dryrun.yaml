@@ -1,0 +1,61 @@
+# Conservative manual targets verified only for MoveIt plan-only checks.
+#
+# This is not an insertion-success configuration. It records a safer planning
+# candidate found on the real OMY-F3M setup with D405 mounted and D435 top-view
+# disabled.
+
+verified: false
+frame_id: link0
+
+box:
+  x: 0.30
+  y: -0.10
+  yaw: 0.0
+
+cell:
+  # x=0.30, y=-0.30 caused self-collision planning failures.
+  # x=0.25, y=-0.15 planned successfully for transport/retract.
+  x: 0.25
+  y: -0.15
+  yaw: 0.0
+
+heights:
+  pre_grasp_z: 0.17
+  grasp_z: 0.115
+  lift_z: 0.26
+  transport_z: 0.26
+  # Original place_z=0.165 failed in plan-only checks. z=0.25 was the lowest
+  # tested successful value for the current cell pose/orientation setup.
+  place_z: 0.25
+  retract_z: 0.26
+
+gripper:
+  open: 0.0
+  close: 0.8
+
+safety:
+  workspace:
+    x_min: -0.10
+    x_max: 0.45
+    y_min: -0.45
+    y_max: 0.20
+    z_min: 0.10
+    z_max: 0.50
+  joint_limits:
+    joint3_min: -2.617
+    joint3_max: 2.617
+
+notes:
+  d435_top_view_enabled: false
+  tested_with_current_ee_orientation: true
+  plan_only_execute: false
+  successful_plan_only_targets:
+    - transport
+    - insert_at_z_0_25
+    - retract
+  known_failures:
+    - original_cell_x_0_30_y_-0_30_transport
+    - place_z_0_165
+    - place_z_0_20
+    - place_z_0_23
+    - place_z_0_24

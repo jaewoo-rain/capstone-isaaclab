@@ -121,6 +121,32 @@ workspace, object dimensions, and collision environment.
 - Do not run `run_chain_once()` with `RealAdapter` until the adapter has safety
   checks and a manual target mode.
 
+## Findings from first guarded execute smoke test
+
+- A guarded `+0.01 m` relative EE move was sent through MoveIt with
+  `execute=true`.
+- MoveIt and `arm_controller` reported success, but TF and `/joint_states`
+  showed no meaningful EE pose change.
+- `/arm_controller/controller_state` reported:
+  - `speed_scaling_factor: 0.0`
+- The same controller state showed reference joints near +/-2*pi for some
+  joints while feedback stayed near the home pose. This indicates a dangerous
+  joint wraparound risk:
+  - `joint1` near `-2*pi`
+  - `joint4` near a wrapped equivalent angle
+  - `joint6` near `-2*pi`
+- URDF limits for `joint1`, `joint4`, and `joint6` are currently +/-2*pi.
+
+Do not run larger real motions until both issues are understood:
+
+1. Why controller execution can report success while the physical robot does
+   not move.
+2. How to prevent MoveIt/controller trajectories from using wrapped joint
+   targets that are far from the current joint state.
+
+Any future execute script must reject planned trajectories with excessive joint
+delta before sending an executable goal.
+
 ## Next implementation steps
 
 1. Add a manual target config loader.
@@ -128,4 +154,6 @@ workspace, object dimensions, and collision environment.
    `box_xy`, `box_yaw`, `cell_xy`, and `cell_yaw`.
 3. Validate generated stage targets with `DryRunAdapter`.
 4. Add MoveIt planning-only checks for each waypoint.
-5. Only after the above, implement a guarded real trajectory sender.
+5. Add joint-delta guards to any real execution path.
+6. Resolve `speed_scaling_factor=0.0` / hardware execution behavior.
+7. Only after the above, implement a guarded real trajectory sender.

@@ -44,6 +44,9 @@ parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--use_vision", action="store_true",
                     help="천장+손목 cam 추정값을 RL/motion 의 obs source 로 사용 "
                          "(default=False, ground truth 사용)")
+parser.add_argument("--yolo_ckpt", type=str, default=None,
+                    help="지정 시 박스 mask 를 YOLO seg inference 로 (default=sim mask). "
+                         "예: runs/segment/source/motion1/yolo_runs/v1_seg/weights/best.pt")
 parser.add_argument("--save_camera_debug", action="store_true",
                     help="scan 시 RGB/seg 이미지를 /tmp/motion1_cam_*.png 에 저장")
 AppLauncher.add_app_launcher_args(parser)
@@ -73,7 +76,46 @@ from isaaclab.utils.math import (
 
 from stable_baselines3 import PPO
 
+# YOLO (optional — yolo_ckpt 지정 시만 사용)
+_yolo_model = None
+if args_cli.yolo_ckpt is not None:
+    from ultralytics import YOLO as _YOLO_cls
+    _yolo_model = _YOLO_cls(args_cli.yolo_ckpt)
+    print(f"[YOLO] loaded {args_cli.yolo_ckpt}")
+
 from source.omy.omy_robot_cfg import OMY_OFF_SELF_COLLISION_CFG
+
+
+def yolo_predict_mask(rgb_np: np.ndarray, class_id: int,
+                      conf: float = 0.5) -> np.ndarray | None:
+    """RGB (H,W,3) → 지정 class_id 의 best mask (H,W bool). 검출 실패 시 None.
+
+    class_id: 0=box, 1=cell (v2_seg_2class 모델 기준).
+    """
+    if _yolo_model is None:
+        return None
+    H, W = rgb_np.shape[:2]
+    results = _yolo_model.predict(rgb_np, conf=conf, verbose=False, imgsz=640)
+    r = results[0]
+    if r.masks is None or r.masks.xy is None or len(r.masks.xy) == 0:
+        return None
+    if r.boxes is None or r.boxes.cls is None:
+        return None
+    cls_ids = r.boxes.cls.cpu().numpy().astype(int)
+    confs = r.boxes.conf.cpu().numpy() if r.boxes.conf is not None else np.ones_like(cls_ids, dtype=np.float32)
+    candidates = [i for i, c in enumerate(cls_ids) if c == class_id]
+    if not candidates:
+        return None
+    best_idx = max(candidates, key=lambda i: confs[i])
+    poly = r.masks.xy[best_idx]
+    mask = np.zeros((H, W), dtype=np.uint8)
+    cv2.fillPoly(mask, [poly.astype(np.int32)], 1)
+    return mask.astype(bool)
+
+
+def yolo_predict_box_mask(rgb_np: np.ndarray, conf: float = 0.5) -> np.ndarray | None:
+    """박스 (class_id=0) 호환 wrapper."""
+    return yolo_predict_mask(rgb_np, class_id=0, conf=conf)
 
 # -------------------- constants --------------------
 BOX_SPAWN = (0.30, -0.10, 0.07)
@@ -112,11 +154,13 @@ GRIPPER_OPEN = 0.0
 
 BOX_SPAWN_XY_NOISE = 0.00
 BOX_SPAWN_YAW_MAX  = 1.396
-CELL_SPAWN_XY_NOISE = 0.05
+# 셀 xy noise 일단 0. 나중에 켜고 싶으면 값 (e.g. 0.05) 다시 넣으면 됨.
+CELL_SPAWN_XY_NOISE = 0.00
 CELL_SPAWN_YAW_MAX  = 1.396
-EE_OFFSET_MIN_M = 0.03
-EE_OFFSET_MAX_M = 0.05
-# Insert (transport 끝점) offset 0 — RL 제거됐으니 정확히 셀 위로
+# Stage 1 끝 ee offset 0 — vision 으로 박스 위치 알면 굳이 random offset 줄 필요 없음.
+EE_OFFSET_MIN_M = 0.0
+EE_OFFSET_MAX_M = 0.0
+# Insert (transport 끝점) offset 0 — 정확히 셀 위로.
 INSERT_OFFSET_MIN_M = 0.0
 INSERT_OFFSET_MAX_M = 0.0
 
@@ -171,7 +215,7 @@ class MotionSceneCfg(InteractiveSceneCfg):
             mass_props=sim_utils.MassPropertiesCfg(mass=BOX_MASS),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.7, 0.7, 0.72), metallic=0.5, roughness=0.4),
+                diffuse_color=(0.7, 0.7, 0.72), metallic=0.85, roughness=0.12),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="max",
                 static_friction=3.0, dynamic_friction=3.0,
@@ -560,10 +604,15 @@ def run_pipeline(sim, scene):
         cell_xy_env = None
         cell_yaw = None
 
-        # 박스
-        box_ids = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
-        if box_ids:
-            mask = np.isin(seg, box_ids)
+        # 박스 — YOLO 우선, 없으면 sim mask
+        mask = None
+        if _yolo_model is not None and rgb_t is not None:
+            mask = yolo_predict_box_mask(rgb_t[0].cpu().numpy()[..., :3])
+        if mask is None:
+            box_ids = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
+            if box_ids:
+                mask = np.isin(seg, box_ids)
+        if mask is not None and mask.any():
             cx_px, cy_px, ang_img, area = _pixel_min_area_rect(mask)
             if area > 0:
                 wx, wy, _ = _unproject_pixel_to_world(
@@ -573,14 +622,19 @@ def run_pipeline(sim, scene):
                 box_xy_env = (wx - env_origin[0].item(), wy - env_origin[1].item())
                 box_yaw = _world_yaw_from_image_angle_topdown(ang_img)
 
-        # 셀 (4 wall 합집합)
-        wall_ids = [i for i, p in id_map.items() if "CellWall" in p]
-        if wall_ids:
-            wall_mask = np.isin(seg, wall_ids)
-            kern = np.ones((9, 9), np.uint8)
-            cell_mask = cv2.morphologyEx(
-                (wall_mask.astype(np.uint8) * 255), cv2.MORPH_CLOSE, kern)
-            cx_px, cy_px, ang_img, area = _pixel_min_area_rect(cell_mask > 0)
+        # 셀 — YOLO 우선 (class_id=1), 없으면 sim mask (4 wall 합집합 → morph close)
+        cell_mask_bool = None
+        if _yolo_model is not None and rgb_t is not None:
+            cell_mask_bool = yolo_predict_mask(rgb_t[0].cpu().numpy()[..., :3], class_id=1)
+        if cell_mask_bool is None:
+            wall_ids = [i for i, p in id_map.items() if "CellWall" in p]
+            if wall_ids:
+                wall_mask = np.isin(seg, wall_ids)
+                kern = np.ones((9, 9), np.uint8)
+                cell_mask_bool = cv2.morphologyEx(
+                    (wall_mask.astype(np.uint8) * 255), cv2.MORPH_CLOSE, kern) > 0
+        if cell_mask_bool is not None and cell_mask_bool.any():
+            cx_px, cy_px, ang_img, area = _pixel_min_area_rect(cell_mask_bool)
             if area > 0:
                 wx, wy, _ = _unproject_pixel_to_world(
                     cx_px, cy_px, depth0, K, cam_pos_w, cam_quat,
@@ -630,19 +684,24 @@ def run_pipeline(sim, scene):
         rgb = wrist_cam.data.output["rgb"][0].cpu().numpy()
         if rgb.shape[-1] >= 3:
             rgb = rgb[..., :3]
-        seg = wrist_cam.data.output["instance_id_segmentation_fast"][0].squeeze(-1).cpu().numpy().astype(np.int32)
-        info = wrist_cam.data.info[0].get("instance_id_segmentation_fast", {})
-        id_map = _id_to_path_mapping(info)
-        box_ids_local = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
+        # YOLO 우선, 없으면 sim mask
+        mask = None
+        if _yolo_model is not None:
+            mask = yolo_predict_box_mask(rgb)
+        if mask is None:
+            seg = wrist_cam.data.output["instance_id_segmentation_fast"][0].squeeze(-1).cpu().numpy().astype(np.int32)
+            info = wrist_cam.data.info[0].get("instance_id_segmentation_fast", {})
+            id_map = _id_to_path_mapping(info)
+            box_ids_local = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
+            if box_ids_local:
+                mask = np.isin(seg, box_ids_local)
         overlay = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).copy()
-        if box_ids_local:
-            mask = np.isin(seg, box_ids_local)
-            if mask.any():
-                red = np.zeros_like(overlay); red[..., 2] = 255
-                overlay[mask] = (0.5 * overlay[mask] + 0.5 * red[mask]).astype(np.uint8)
-                mask_u8 = mask.astype(np.uint8) * 255
-                contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(overlay, contours, -1, (0, 255, 255), 1)
+        if mask is not None and mask.any():
+            red = np.zeros_like(overlay); red[..., 2] = 255
+            overlay[mask] = (0.5 * overlay[mask] + 0.5 * red[mask]).astype(np.uint8)
+            mask_u8 = mask.astype(np.uint8) * 255
+            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, contours, -1, (0, 255, 255), 1)
         path = f"/tmp/motion1_wristcam_{label}.png"
         cv2.imwrite(path, overlay)
         print(f"  [wrist_cam] saved {path}")
@@ -672,25 +731,34 @@ def run_pipeline(sim, scene):
             return None
         _update_wrist_cam_pose()
         wrist_cam.update(dt=control_dt, force_recompute=True)
-        if "instance_id_segmentation_fast" not in wrist_cam.data.output:
+        if "distance_to_image_plane" not in wrist_cam.data.output:
             return None
-        seg = wrist_cam.data.output["instance_id_segmentation_fast"][0].squeeze(-1).cpu().numpy().astype(np.int32)
         depth0 = wrist_cam.data.output["distance_to_image_plane"][0].squeeze(-1)
-        info_dict = wrist_cam.data.info[0].get("instance_id_segmentation_fast", {})
         K = wrist_cam.data.intrinsic_matrices[0]
         cam_pos_w = wrist_cam.data.pos_w[0]
         cam_quat = wrist_cam.data.quat_w_world[0]
-        id_map = _id_to_path_mapping(info_dict)
 
-        nonlocal _wrist_box_ids
-        if not _wrist_box_ids:
-            _wrist_box_ids = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
-            if _wrist_box_ids:
-                print(f"  [wrist_cam] box ids cached: {_wrist_box_ids}")
-        if not _wrist_box_ids:
-            return None
-
-        mask = np.isin(seg, _wrist_box_ids)
+        # YOLO 우선, 없으면 sim mask
+        mask = None
+        if _yolo_model is not None and "rgb" in wrist_cam.data.output:
+            rgb = wrist_cam.data.output["rgb"][0].cpu().numpy()
+            if rgb.shape[-1] >= 3:
+                rgb = rgb[..., :3]
+            mask = yolo_predict_box_mask(rgb)
+        if mask is None:
+            if "instance_id_segmentation_fast" not in wrist_cam.data.output:
+                return None
+            seg = wrist_cam.data.output["instance_id_segmentation_fast"][0].squeeze(-1).cpu().numpy().astype(np.int32)
+            info_dict = wrist_cam.data.info[0].get("instance_id_segmentation_fast", {})
+            id_map = _id_to_path_mapping(info_dict)
+            nonlocal _wrist_box_ids
+            if not _wrist_box_ids:
+                _wrist_box_ids = [i for i, p in id_map.items() if "/Box" in p and "CellWall" not in p]
+                if _wrist_box_ids:
+                    print(f"  [wrist_cam] box ids cached: {_wrist_box_ids}")
+            if not _wrist_box_ids:
+                return None
+            mask = np.isin(seg, _wrist_box_ids)
         # 4 corners + center 모두 image space 에서 추출 (cv2.minAreaRect)
         mask_u8 = mask.astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

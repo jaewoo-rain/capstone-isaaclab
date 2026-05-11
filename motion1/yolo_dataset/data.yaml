@@ -1,0 +1,7 @@
+path: /home/jaewoo/IsaacLab/source/motion1/yolo_dataset
+train: images/train
+val: images/val
+nc: 2
+names:
+- box
+- cell

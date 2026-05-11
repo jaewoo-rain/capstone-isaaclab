@@ -101,9 +101,19 @@ class DryRunAdapter(BaseAdapter):
         self._rclpy.spin_once(self.node, timeout_sec=0.0)
 
     def _lookup_transform(self, source_frame: str):
-        self._spin_some()
-        return self.tf_buffer.lookup_transform(
-            self.base_frame, source_frame, self._rclpy.time.Time())
+        deadline = time.monotonic() + 5.0
+        last_error = None
+        while time.monotonic() < deadline:
+            self._spin_some()
+            try:
+                return self.tf_buffer.lookup_transform(
+                    self.base_frame, source_frame, self._rclpy.time.Time())
+            except Exception as exc:  # tf2_ros exception classes vary by distro.
+                last_error = exc
+                self._rclpy.spin_once(self.node, timeout_sec=0.05)
+        raise RuntimeError(
+            f"Timed out waiting for TF {self.base_frame} -> {source_frame}. "
+            f"Last error: {last_error}") from last_error
 
     def _validate_target(self, target_pos: np.ndarray, gripper_value: float) -> list[str]:
         x, y, z = [float(v) for v in target_pos]

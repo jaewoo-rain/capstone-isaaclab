@@ -1,0 +1,43 @@
+# Manual target poses for OMY-F3M real-robot dry-run.
+#
+# These values are a starting draft only. Keep verified=false until the pose is
+# measured in the real workspace and checked with dry-run/planning.
+
+verified: false
+frame_id: link0
+
+box:
+  x: 0.30
+  y: -0.10
+  yaw: 0.0
+
+cell:
+  x: 0.30
+  y: -0.30
+  yaw: 0.0
+
+heights:
+  pre_grasp_z: 0.17
+  grasp_z: 0.115
+  lift_z: 0.26
+  transport_z: 0.26
+  place_z: 0.165
+  retract_z: 0.26
+
+gripper:
+  open: 0.0
+  # motion2 sim uses 0.8, while OMY-F3M SRDF close state is 1.12.
+  # Verify the real rh_r1_joint range before using a close command.
+  close: 0.8
+
+safety:
+  workspace:
+    x_min: -0.10
+    x_max: 0.45
+    y_min: -0.45
+    y_max: 0.20
+    z_min: 0.10
+    z_max: 0.50
+  joint_limits:
+    joint3_min: -2.617
+    joint3_max: 2.617

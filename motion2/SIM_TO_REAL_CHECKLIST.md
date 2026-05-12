@@ -6,7 +6,7 @@ checks for `motion2`.
 ## Current hardware state
 
 - Robot: OMY-F3M, ROS2 Jazzy bringup works with:
-  - `ros2 launch open_manipulator_bringup omy_ai.launch.py`
+  - `ros2 launch open_manipulator_bringup omy_f3m.launch.py`
 - Wrist camera: D405 is expected to be mounted on the wrist.
 - Top camera: D435 exists, but is not mounted/calibrated as a top-view camera yet.
 
@@ -27,9 +27,12 @@ Because the D435 top camera is not ready, the original fully automatic
   - `rh_r1_joint`
 - Trajectory action:
   - `/arm_controller/follow_joint_trajectory`
+- Gripper action:
+  - `/gripper_controller/gripper_cmd`
 - Active controllers:
   - `joint_state_broadcaster`
   - `arm_controller`
+  - `gripper_controller`
 - Command interface:
   - `position`
 
@@ -43,21 +46,20 @@ Because the D435 top camera is not ready, the original fully automatic
   - `camera_link`
 - Do not assume `base_link` exists in the real robot TF tree.
 
-## Important MoveIt/controller mismatch
+## Important bringup/controller note
 
 MoveIt config declares:
 
 - `arm_controller`: `joint1` to `joint6`
 - `gripper_controller`: `rh_r1_joint`
 
-But the real bringup exposes:
+With the regular `omy_f3m.launch.py` bringup, the real robot exposes:
 
-- `arm_controller`: `joint1` to `joint6` plus `rh_r1_joint`
-- no separate `gripper_controller`
+- `arm_controller`: `joint1` to `joint6`
+- `gripper_controller`: `rh_r1_joint`
 
-Real execution code should account for this mismatch. For the current bringup,
-the gripper joint should be treated as part of the same trajectory controller
-unless the bringup/config is changed.
+Do not use `omy_ai.launch.py` for direct MoveIt or smoke-test execution because
+that launch starts the leader/follower teleoperation setup.
 
 ## Current recommended deployment path: manual target mode
 
@@ -181,24 +183,61 @@ bringup and verified through `/joint_states`:
 - `joint5 +0.005 rad`
 - `joint5 -0.005 rad`
 - `rh_r1_joint +0.03`
-- `rh_r1_joint -0.02`
+- `rh_r1_joint -0.005`
 
 These checks confirm that direct joint-space `FollowJointTrajectory` commands
 and `gripper_controller/gripper_cmd` commands can reach the hardware when using
 the regular bringup.
 
+The following named smoke sequences were also executed successfully on the real
+robot:
+
+- `basic_joint_roundtrip`: 4/4 successful
+- `basic_gripper_roundtrip`: 2/2 successful
+- `full_basic_smoke`: 6/6 successful
+- `run_pick_place_mvp.py --relative-z 0.002`: plan guard passed and
+  `ExecuteTrajectory` succeeded for one guarded relative pose stage.
+- `run_pick_place_mvp.py --relative-z -0.002`: plan guard passed and
+  `ExecuteTrajectory` succeeded for one guarded relative pose stage.
+- `run_pick_place_mvp.py --only close_gripper/open_gripper`: gripper action path
+  succeeded through the MVP runner.
+
 Keep these as smoke-test bounds for now:
 
 - arm single-joint delta <= `0.01 rad`
 - gripper delta <= `0.03`
-- no Cartesian pose execution yet
-- no full chain execution yet
+- gripper open delta from near-open state <= `0.005`
+- Cartesian/pose execution is allowed only for single-stage relative motions
+  that pass `run_pick_place_mvp.py --plan-guard` immediately before execute.
+- no full pick-place chain execution yet
+
+## MVP runner status
+
+`motion2/scripts/run_pick_place_mvp.py` provides the current presentation-grade
+MVP runner:
+
+- dry-run mode prints the object-to-slot chain stages without sending commands.
+- `--plan-guard` asks MoveIt for plan-only trajectories and rejects large joint
+  spans before execution.
+- `--execute --confirm EXECUTE_PICK_PLACE_MVP` is required for any real command.
+- relative pose smoke tests are available through `--relative-x`,
+  `--relative-y`, and `--relative-z`.
+- gripper-only MVP stages are available through `--only close_gripper` and
+  `--only open_gripper`.
+
+Use the MVP runner for demo structure and guarded smoke execution only. The
+script is not yet approved for full pick-and-place execution.
 
 ## Still unsafe / unresolved
 
 - MoveIt Cartesian pose goals can produce large joint deltas even for tiny EE
   offsets. Do not execute them until trajectory joint-delta checks and
   continuous-joint wrapping are resolved.
+- Absolute MVP stages such as `transport` can plan successfully but still be
+  rejected by trajectory guard because MoveIt may generate joint spans near
+  wraparound. Do not execute those stages until the planner/constraints are
+  improved.
+- `grasp_z=0.115` failed MoveIt plan-only checks in the current setup.
 - `motion2` full chain still lacks a guarded `RealAdapter`.
 - D405 image, YOLO detection, and RL grasp policy have not been validated on
   the real robot.
@@ -207,11 +246,13 @@ Keep these as smoke-test bounds for now:
 
 ## Next implementation steps
 
-1. Add a manual target config loader.
-2. Add a dry-run chain script that skips `top_cam_scan()` and uses manual
-   `box_xy`, `box_yaw`, `cell_xy`, and `cell_yaw`.
-3. Validate generated stage targets with `DryRunAdapter`.
-4. Add MoveIt planning-only checks for each waypoint.
-5. Add joint-delta guards to any real execution path.
-6. Resolve `speed_scaling_factor=0.0` / hardware execution behavior.
-7. Only after the above, implement a guarded real trajectory sender.
+1. Use `run_pick_place_mvp.py` for the demo-level object-to-slot dry-run.
+2. Keep real robot motion limited to smoke sequences, gripper-only commands,
+   and single relative pose stages that pass `--plan-guard`.
+3. Add a planner constraint or joint-space target strategy that avoids
+   continuous-joint wraparound for absolute pose stages.
+4. Add collision objects for table, bin, and known workspace geometry.
+5. Validate D405/D435 vision calibration before using camera detections as real
+   execution targets.
+6. Only after the above, expand from guarded stage execution to full
+   pick-and-place execution.

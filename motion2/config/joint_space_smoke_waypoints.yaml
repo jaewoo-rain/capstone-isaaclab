@@ -1,0 +1,68 @@
+# Guarded joint-space waypoints for early OMY-F3M real-robot tests.
+#
+# These are intentionally tiny relative motions. They are not the pick-and-place
+# task. Use them to verify the command path before building any RealAdapter
+# execution path.
+
+verified: true
+bringup: omy_f3m.launch.py
+controller:
+  arm_action: /arm_controller/follow_joint_trajectory
+  gripper_action: /gripper_controller/gripper_cmd
+
+safety:
+  max_joint_delta_per_step: 0.02
+  max_gripper_delta_per_step: 0.04
+  default_duration: 3.0
+  execute_requires_confirm: true
+
+arm_joints:
+  - joint1
+  - joint2
+  - joint3
+  - joint4
+  - joint5
+  - joint6
+
+tested_commands:
+  - name: joint6_plus_small
+    type: arm_delta
+    delta:
+      joint6: 0.01
+    observed: reached encoder target
+
+  - name: joint6_minus_small
+    type: arm_delta
+    delta:
+      joint6: -0.01
+    observed: reached encoder target
+
+  - name: joint5_plus_tiny
+    type: arm_delta
+    delta:
+      joint5: 0.005
+    observed: reached encoder target
+
+  - name: joint5_minus_tiny
+    type: arm_delta
+    delta:
+      joint5: -0.005
+    observed: reached encoder target
+
+  - name: gripper_close_tiny
+    type: gripper_delta
+    joint: rh_r1_joint
+    delta: 0.03
+    observed: reached near 0.03 in joint_states
+
+  - name: gripper_open_tiny
+    type: gripper_delta
+    joint: rh_r1_joint
+    delta: -0.005
+    observed: returned closer to open in joint_states without crossing below zero
+
+blocked_paths:
+  - name: cartesian_relative_z_plus_0_01
+    reason: MoveIt pose goal generated excessive joint delta
+  - name: full_motion2_chain
+    reason: RealAdapter, D405 vision, RL grasp, and insert planning are not validated

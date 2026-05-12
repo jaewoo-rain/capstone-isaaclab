@@ -2,6 +2,33 @@
 
 OMY 로봇으로 박스를 잡고 셀(상자)에 삽입하는 pick-and-place 작업. 시뮬레이션에서 학습/검증 후 real RealSense D435/D405 + OMY ROS 로 deploy 하기 위한 모듈화 구조.
 
+## Current MVP demo status
+
+현재 실제 OMY-F3M 데모는 전체 pick-and-place execute가 아니라,
+`dry-run / MoveIt plan-only / guarded smoke execution`으로 분리해서 진행한다.
+
+빠른 시연 절차와 금지 항목은 아래 문서를 기준으로 한다.
+
+```text
+motion2/MVP_DEMO.md
+motion2/SIM_TO_REAL_CHECKLIST.md
+```
+
+현재 승인된 real-robot 범위:
+
+- tiny joint/gripper smoke sequence
+- `run_pick_place_mvp.py`의 dry-run chain 출력
+- `run_pick_place_mvp.py --demo-safe` 발표용 안전 흐름 출력
+- MoveIt plan-only waypoint 검증
+- trajectory guard를 통과한 단일 relative pose smoke stage
+
+아직 금지:
+
+- full pick-and-place real execution
+- `grasp_z=0.115` execution
+- absolute `transport`/`insert` pose execution
+- camera/RL output을 실제 로봇 명령으로 직접 사용
+
 ---
 
 ## 폴더 구조

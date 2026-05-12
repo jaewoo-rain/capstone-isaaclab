@@ -1,0 +1,29 @@
+# Named smoke-test sequences built from joint_space_smoke_waypoints.yaml.
+#
+# These sequences are for guarded command-path validation only. They are not
+# pick-and-place motions.
+
+sequences:
+  basic_joint_roundtrip:
+    description: Move joint6 and joint5 by tiny deltas, then return them.
+    steps:
+      - joint6_plus_small
+      - joint6_minus_small
+      - joint5_plus_tiny
+      - joint5_minus_tiny
+
+  basic_gripper_roundtrip:
+    description: Close and reopen the gripper by tiny deltas.
+    steps:
+      - gripper_close_tiny
+      - gripper_open_tiny
+
+  full_basic_smoke:
+    description: Run tiny arm and gripper roundtrips.
+    steps:
+      - joint6_plus_small
+      - joint6_minus_small
+      - joint5_plus_tiny
+      - joint5_minus_tiny
+      - gripper_close_tiny
+      - gripper_open_tiny

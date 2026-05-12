@@ -423,25 +423,56 @@ EE target quat = R_z(ee_yaw) ⊗ base_ee_quat
 | v11 | v6_clean | action 5mm + gain 80 (4M) | 0~1% |
 | v12 | v6_clean | v11 + **is_grasping mask 제거** (4M) | 0~1%, r_xy_align 0.92 |
 | v13 | v6_clean | v12 + **dual reward** (gain 80 + 200, 4M, sim_dt 1/120) | 1%, 진단 metric 추가 |
-| v14 | v6_clean | **sim_dt 1/120 → 1/60 + decimation 1** (4M) | **1~3%** ← 현재 best |
+| v14 | v6_clean | **sim_dt 1/120 → 1/60 + decimation 1** (4M) | **1~3%** |
+| v15 | (취소) | EE_OFFSET 0~10cm 첫 시도 | — |
+| v16 | (취소) | EE_OFFSET 3~5cm 원복 시도 | — |
+| v17 | **v17_clean** (764 sample, drop 23% filter) | v14 + EE_OFFSET 0~10cm 확장 (chain runner 분포 mismatch 해결) | **2~3%, is_grasping 85% (v14 의 9배)** |
+| v18 | v17_clean | v17 + reward 정밀화 (xy gain 80→40, yaw 5→15, align 10→5mm, hold 15→30, threshold 5mm) | **14%, xy_dist 5.8cm** |
+| v19 | v17_clean | v18 + r_smooth 0.01→0.1, fail_xy 0.30→0.10, r_far_penalty(w=20, 1cm 부터) | **15%, xy_dist 3.5cm** ← 분포 확장 + 페널티 효과 |
+| v20 | v17_clean | v19 + action_scale_xy 5→2mm + r_action_penalty 0.5 | **1% 악화** (2mm + penalty 둘 다 너무 강함, cell 도달 능력 잃음) |
+| v21 | v17_clean | v19 + r_action_penalty 0.1 (action_scale 5mm 원복) | **17%, yaw_err 2.5°** ← 현재 best |
 
-핵심 발견:
-- v1→v2: yaw 비누적 + drop penalty 제거 → ep_rew_mean 큰 폭 ↑
-- v6→v7: align threshold 완화로 success terminate 가능
-- v11→v12: is_grasping mask 제거 → 학습 신호 5배 ↑ (xy_align reward 6배)
-- v13→v14: sim_dt 1/60 (chain runner 와 일치) → SPS 43% ↑ + success rate 2배 ↑
+## 2026-05-12 시도 — 진단 + reward shaping (v17~v21)
 
-진짜 bottleneck (v14 진단):
-- **is_grasping_rate 12%** (박스 86% 시간 떨어진 자세) ← 학습 환경 한계
-- xy_aligned 6%, yaw_aligned 75%, aligned (전체) 1.5%
-- ep_len 44.8 step (5초 max 의 15%) — drop 으로 짧게 termination
-- play_insert.py 단독 OK, **chain runner 에서만 안 됨** ← 미해결 미스터리
+### Root cause 진단 (v14 → v17)
+- **분포 mismatch 발견**: collect 의 EE_OFFSET 3~5cm vs chain runner 의 offset 0. chain runner 시작 자세가 학습 분포 밖이라 fail
+- **해결**: EE_OFFSET 0~10cm 으로 확대 + drop sample 후처리 filter (23% drop)
+- **결과 (v17)**: is_grasping_rate **10% → 85%** (9배 ↑). 단 success 그대로 2-3%
 
-ckpt 백업 위치 (절대 건드리지 말 것):
-- `motion1_insert_v1.zip` (1M dirty) ~ `motion1_insert_v9_6M.zip` (6M)
-- `motion1_insert_v10_5mm_g200.zip`, `motion1_insert_v11_5mm_g80_mask.zip`
-- `motion1_insert_v12_nomask.zip`, `motion1_insert_v13_dual.zip`
-- `motion1_insert_best.zip` (현재) = **v14 best (success_recent 1~3%)**
+### Reward 정밀화 (v17 → v18)
+- align threshold 10mm → 5mm, yaw 5° → 3°, hold 15 → 30
+- gain 80 (wide) → 40, yaw 5 → 15 (sharper)
+- 결과: success 14%, xy_dist_mean 5.8cm
+
+### 발산 방지 (v18 → v19)
+- 사용자 본 발산 케이스 (ee 가 cell 에서 15cm 떨어진 채 머무름)
+- fail_xy_threshold 0.30 → 0.10 (10cm 밖 즉시 terminate)
+- r_far_penalty (w=20, 1cm 초과 거리 비례 페널티)
+- 결과: success 15%, xy_dist 3.5cm. 단 fa_rate_5cm 32%, very_far_8cm 11% 남음
+
+### Fine motor 시도 실패 (v19 → v20)
+- 진단 결과 `action_norm_mean = 1.33`, **항상 max action**. fine motor X
+- action_scale_xy 5mm → 2mm + r_action_penalty 0.5 동시 적용
+- 결과: success 1% **악화**. action 작아졌으나 cell 도달 능력 잃음
+
+### 균형점 (v20 → v21)
+- action_scale 5mm 원복 + r_action_penalty 0.5 → 0.1 약하게
+- 결과: **success 17% (현재 best)**, yaw_err 2.5°, xy_dist 3.4cm, close_rate_2cm 46%
+
+## 미해결 (v21 시점)
+- **xy 정렬 정밀도 한계**: xy_aligned_rate 20-23%. 1cm 안 도달은 못 함 (action_scale_xy 5mm 의 정밀도 한계)
+- **action_norm 여전히 max** (penalty 0.1 약함): fine motor 학습 X
+- 사용자 관찰: 박스가 살짝 잘못 잡혔을 때 정렬 잘 되고, 똑바로 잡힐 때 발산하는 경향 (의문)
+- 한 방향 drift 가끔 발생 (box swing torque 가능성)
+
+## ckpt 백업 위치 (절대 건드리지 말 것)
+- `motion1_insert_v1.zip` ~ `motion1_insert_v14_best.zip` (이전 시도들)
+- `motion1_insert_v17.zip`, `v18.zip`, `v19.zip`, `v20.zip` (v17~v20 시점 백업)
+- `motion1_insert_best.zip` (현재) = **v21 best (success_recent 14~17%)**
+
+## Dataset 위치
+- `insert_handoff_states_v17_clean.npz` (764 sample, EE_OFFSET 0~10cm, drop filter 후)
+- `insert_handoff_states.npz` = default path. 현재 v17_clean 복사본
 
 ---
 

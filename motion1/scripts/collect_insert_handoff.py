@@ -25,7 +25,7 @@ from isaaclab.app import AppLauncher
 
 # -------------------- argparse --------------------
 parser = argparse.ArgumentParser(description="Collect handoff dataset for Insert RL.")
-parser.add_argument("--gripper_close", type=float, default=0.8)
+parser.add_argument("--gripper_close", type=float, default=0.8)  # v14 시점 복원
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--target", type=int, default=5000,
                     help="수집할 handoff state 개수")
@@ -60,7 +60,7 @@ from stable_baselines3 import PPO
 from source.omy.omy_robot_cfg import OMY_OFF_SELF_COLLISION_CFG
 
 # -------------------- constants (env-relative) --------------------
-BOX_SPAWN = (0.30, -0.10, 0.07)
+BOX_SPAWN = (0.30, -0.10, 0.07)  # v14 시점 복원
 BOX_SIZE = (0.139, 0.044, 0.118)
 BOX_MASS = 0.3
 
@@ -85,7 +85,7 @@ STAGE_DURATION_S: dict[str, float] = {
     "descend":        1.0,
     "close":          1.5,
     "lift":           2.0,
-    "transport":      3.0,
+    "transport":      3.0,  # v10: 박스 yaw 0 fixed → slip 없음 → 빠르게 OK (v9 의 6s 원복)
 }
 SETTLE_S = 0.5
 GRIPPER_OPEN = 0.0
@@ -98,9 +98,9 @@ BOX_SPAWN_YAW_MAX  = 1.396
 CELL_SPAWN_YAW_MAX = 1.396     # ±80°
 CELL_SPAWN_XY_NOISE = 0.05     # ±5cm (robot reach 안전 범위)
 
-# ee 시작 offset (grasp 와 동일)
-EE_OFFSET_MIN_M = 0.03
-EE_OFFSET_MAX_M = 0.05
+# ee 시작 offset — v17: 분포 확장 (0~10cm). v14 setup + 분포만 확장.
+EE_OFFSET_MIN_M = 0.00
+EE_OFFSET_MAX_M = 0.10
 
 # RL action scale
 RL_ACTION_SCALE_XY  = 0.01
@@ -144,7 +144,7 @@ class CollectSceneCfg(InteractiveSceneCfg):
                 diffuse_color=(0.7, 0.7, 0.72), metallic=0.5, roughness=0.4),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="max",
-                static_friction=3.0, dynamic_friction=3.0,
+                static_friction=3.0, dynamic_friction=3.0,  # v14 시점 복원
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=BOX_SPAWN),
@@ -264,7 +264,7 @@ def run_collect(sim, scene):
             root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
         ik.set_command(torch.cat([tgt_pos_b, tgt_quat_b], dim=-1))
         arm_target = ik.compute(ee_pos_b, ee_quat_b, jac, cur_arm_q)
-        tip_ratio = 2.3
+        tip_ratio = 2.3  # v14 시점 복원
         gripper_target = torch.tensor(
             [[gripper_value, gripper_value * tip_ratio, gripper_value, gripper_value * tip_ratio]],
             device=device).expand(scene.num_envs, -1)
@@ -451,8 +451,7 @@ def run_collect(sim, scene):
                    STAGE_DURATION_S["lift"], gripper_close,
                    start_quat_w=ee_quat_after_align, end_quat_w=ee_quat_after_align)
 
-        # Stage 3d: transport + yaw → cell_yaw 정렬 (cell_yaw 가 random) + ee xy noise (3~5cm)
-        # ee 가 cell 에서 살짝 빗나간 자리에 도달 → 정렬 학습용
+        # Stage 3d: transport + yaw → cell_yaw 정렬 (v14 방식 복원)
         cell_target_quat = quat_mul(
             quat_from_angle_axis(
                 torch.tensor([cyaw], device=device, dtype=torch.float),
@@ -475,7 +474,7 @@ def run_collect(sim, scene):
         box_quat_now = box.data.root_quat_w[0].cpu().numpy().astype(np.float32)
         cell_xy_arr = np.array([cx, cy], dtype=np.float32)
         cell_yaw_arr = np.array([cyaw], dtype=np.float32)
-        ee_target_yaw_arr = np.array([cyaw], dtype=np.float32)  # stage 3d 끝에서 ee_target_yaw 가 cyaw 로 정렬됨
+        ee_target_yaw_arr = np.array([cyaw], dtype=np.float32)  # v14: ee_target_yaw = cell_yaw
 
         out_joint_pos.append(joint_pos_now)
         out_box_pos_env.append(box_pos_env_now)

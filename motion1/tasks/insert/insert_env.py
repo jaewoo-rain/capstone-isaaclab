@@ -258,6 +258,15 @@ class InsertEnv(DirectRLEnv):
         r_yaw_align = torch.exp(-self.cfg.reward_yaw_align_gain * (yaw_err ** 2))
         r_smooth = -self.cfg.reward_smooth_w * (ee_vel[:, 0] ** 2 + ee_vel[:, 1] ** 2 + yaw_vel ** 2)
 
+        # v19: 거리 페널티 — 1cm 초과 거리 비례 페널티 (1cm 안 유도)
+        xy_dist = torch.sqrt(xy_dist2 + 1e-9)
+        r_far_penalty = -self.cfg.reward_far_penalty_w * torch.clamp(
+            xy_dist - self.cfg.reward_far_threshold, min=0.0
+        )
+
+        # v20: action L2 penalty — 정책이 작은 action 출력 학습 (fine motor)
+        r_action_penalty = -self.cfg.reward_action_penalty_w * (self._actions ** 2).sum(dim=-1)
+
         # alignment 분리 metric — 학습 진단용 (xy / yaw 어느 쪽 부족인지)
         xy_aligned = (
             (slot_rel[:, 0].abs() < self.cfg.align_xy_threshold) &
@@ -270,7 +279,20 @@ class InsertEnv(DirectRLEnv):
         will_succeed = aligned & ((self._aligned_count + 1) >= self.cfg.success_hold_steps)
         r_success_lump = will_succeed.float() * self.cfg.reward_success_lump
 
-        total = r_xy_align + r_xy_align_close + r_yaw_align + r_smooth + r_success + r_success_lump
+        total = r_xy_align + r_xy_align_close + r_yaw_align + r_smooth + r_success + r_success_lump + r_action_penalty
+
+        # v19+ 진단: 발산/안정성 metric
+        ee_speed = torch.sqrt(ee_vel[:, 0] ** 2 + ee_vel[:, 1] ** 2 + 1e-9)
+        action_norm = torch.norm(self._actions, dim=-1)
+        far_rate = (xy_dist > 0.05).float().mean()        # 5cm 이상 비율
+        very_far_rate = (xy_dist > 0.08).float().mean()   # 8cm (발산 직전) 비율
+        close_rate = (xy_dist < 0.02).float().mean()      # 2cm 이내 비율
+        # box vs ee yaw mismatch (slip 정도)
+        box_yaw = self._extract_box_yaw_if_available()
+        if box_yaw is not None:
+            box_ee_yaw_diff = wrap_to_pi(box_yaw - cur_ee_yaw).abs().mean()
+        else:
+            box_ee_yaw_diff = torch.tensor(0.0, device=self.device)
 
         self.reward_log = {
             "r_xy_align": float(r_xy_align.mean().item()),
@@ -279,6 +301,8 @@ class InsertEnv(DirectRLEnv):
             "r_smooth": float(r_smooth.mean().item()),
             "r_success": float(r_success.mean().item()),
             "r_success_lump": float(r_success_lump.mean().item()),
+            "r_far_penalty": float(r_far_penalty.mean().item()),
+            "r_action_penalty": float(r_action_penalty.mean().item()),
             # 진단 metric — 어느 정렬 조건 부족인지
             "xy_aligned_rate": float(xy_aligned.float().mean().item()),
             "yaw_aligned_rate": float(yaw_aligned.float().mean().item()),
@@ -287,8 +311,26 @@ class InsertEnv(DirectRLEnv):
             # 평균 거리 (학습 중 줄어드는지)
             "xy_dist_mean": float(torch.sqrt(xy_dist2 + 1e-9).mean().item()),
             "yaw_err_abs_mean": float(yaw_err.abs().mean().item()),
+            # v19+ 발산/안정성 진단
+            "far_rate_5cm": float(far_rate.item()),
+            "very_far_rate_8cm": float(very_far_rate.item()),
+            "close_rate_2cm": float(close_rate.item()),
+            "ee_speed_mean": float(ee_speed.mean().item()),
+            "ee_speed_max": float(ee_speed.max().item()),
+            "action_norm_mean": float(action_norm.mean().item()),
+            "action_norm_max": float(action_norm.max().item()),
+            "box_ee_yaw_diff_rad": float(box_ee_yaw_diff.item()),
         }
         return total
+
+    def _extract_box_yaw_if_available(self) -> torch.Tensor | None:
+        """box quat → world Z yaw (있으면)."""
+        try:
+            q = self._object.data.root_quat_w  # (N, 4) wxyz
+            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+            return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -359,7 +401,10 @@ class InsertEnv(DirectRLEnv):
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
 
         # ---- 박스 자세 적용 (env-rel → world) ----
-        box_pos_w = box_pos_env_d + self.scene.env_origins[env_ids_t]
+        # v10: reset 시 box z 에 +5mm offset (ground penetration 회피, finger 안 박스 위치 미세 조정)
+        box_pos_env_d_lifted = box_pos_env_d.clone()
+        box_pos_env_d_lifted[:, 2] += 0.01
+        box_pos_w = box_pos_env_d_lifted + self.scene.env_origins[env_ids_t]
         self._object.write_root_pose_to_sim(
             torch.cat([box_pos_w, box_quat_d], dim=-1),
             env_ids=env_ids_t,

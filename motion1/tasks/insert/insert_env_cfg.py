@@ -1,12 +1,13 @@
 """motion1 — Insert RL env cfg.
 
-Task: 박스 잡힌 채 셀 위에서 xy/yaw 미세 정렬 (RL).
-- Action (3): Δx, Δy, Δyaw (cartesian, relative)
-- State (7): slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping, ee_vel_x, ee_vel_y, yaw_vel
+Task: 박스 잡힌 채 셀 위에서 yaw 정렬 (RL, 단순화 버전).
+- Action (1): Δyaw
+- State (3): yaw_err, yaw_vel, is_grasping
+- ee_xy: cell_xy 에 고정 (학습 안 함)
 - ee_z, gripper: 고정 (학습 안 함)
-- 시작 상태: handoff dataset 에서 random sample + 추가 noise
+- 시작 상태: handoff dataset (xy noise 0 + ee_yaw=0)
 
-motion-only chain 의 단계 4 (insert 미세조정) 만 RL 로 학습.
+motion-only chain 의 단계 4 (yaw 정렬) 만 RL 로 학습.
 """
 from __future__ import annotations
 
@@ -29,10 +30,10 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # 1. 기본 RL env 설정
     # =========================
     decimation: int = 1
-    episode_length_s: float = 5.0
+    episode_length_s: float = 3.0
 
-    action_space: int = 3       # Δx, Δy, Δyaw
-    observation_space: int = 7  # slot_rel_x/y, slot_yaw_err, is_grasping, ee_vel_x/y, yaw_vel
+    action_space: int = 1       # Δyaw
+    observation_space: int = 3  # yaw_err, yaw_vel, is_grasping
     state_space: int = 0
 
     # =========================
@@ -125,36 +126,23 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # =========================
     # 8. Action scale
     # =========================
-    action_scale_xy: float = 0.005    # v21: 2mm → 5mm 원복 (v20 의 2mm 너무 작음)
     action_scale_yaw: float = 0.05    # ~2.86°/step
 
     # =========================
-    # 9. Reward 가중치
-    # all-positive (drop 은 termination 으로 자연 페널티)
+    # 9. Reward (단순 — yaw 정렬 + success bonus)
     # =========================
-    reward_xy_align_gain: float = 200.0        # v22: 40 → 200 (landscape sharpen, 5cm 에서 0.9→0.61)
-    reward_xy_align_gain_close: float = 500.0  # v22: 100 → 500 (1cm 안 sharp, 0.99→0.95)
-    reward_yaw_align_gain: float = 15.0    # v18: 5 → 15 (sharper yaw)
-    reward_smooth_w: float = 0.0          # v20: ee_vel 페널티 제거 (효과 없음)
-    reward_success_bonus: float = 50.0    # aligned 매 step (정렬 유지 + holding)
-    reward_success_lump: float = 5000.0   # success terminate 시 한 번에
-    # v19: 거리 페널티 — 1cm 초과 거리에 비례 페널티 (1cm 안 유도)
-    reward_far_penalty_w: float = 20.0    # -w × max(0, xy_dist - 0.01)
-    reward_far_threshold: float = 0.01    # 1cm 이상 떨어지면 페널티 시작
-    # v20: action L2 penalty — fine motor control 학습 (정책이 작은 action 출력)
-    reward_action_penalty_w: float = 0.1  # v21: 0.5 → 0.1 (약하게, cell 도달 능력 회복)
+    reward_yaw_align_gain: float = 15.0   # exp(-15 × yaw_err²)
+    reward_success_bonus: float = 10.0    # aligned 매 step
 
-    # is_grasping 판정 (finger ↔ box 거리 + box z 임계)
-    grasping_dist_threshold: float = 0.07   # finger center ↔ box 거리 7cm 이내
-    box_drop_z_threshold: float = 0.12      # box z < 12cm 면 떨어뜨림 (박스가 long edge 로 누워도 검출 가능)
+    # is_grasping 판정
+    grasping_dist_threshold: float = 0.07   # finger ↔ box 7cm 이내
+    box_drop_z_threshold: float = 0.12      # box z < 12cm 면 떨어뜨림
 
     # =========================
     # 10. 종료 조건
     # =========================
-    align_xy_threshold: float = 0.005     # v18: 10mm → 5mm (정밀)
-    align_yaw_threshold: float = 0.052    # v18: 5° → 3° (정밀)
-    success_hold_steps: int = 30          # v18: 15 → 30 (0.25s → 0.5s)
-    fail_xy_threshold: float = 0.20       # v22: 0.10 → 0.20 임시 확장 (학습 초반 발산 허용, terminate 너무 잦아 학습 못 함)
+    align_yaw_threshold: float = 0.052    # ~3°
+    success_hold_steps: int = 30          # 0.5s
 
     # =========================
     # 11. 이름 매핑 (motion-only 와 동일)

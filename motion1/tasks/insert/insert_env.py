@@ -1,9 +1,10 @@
-"""motion1 — Insert 미세 정렬 RL Env.
+"""motion1 — Insert yaw 정렬 RL Env (단순 버전).
 
-박스 잡힌 채 셀 위에서 xy/yaw 정렬. handoff dataset 에서 시작 상태 random sample.
+박스 잡힌 채 셀 위에서 yaw 만 정렬. handoff dataset 에서 시작 상태 random sample.
 
-State (7):  slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping, ee_vel_x, ee_vel_y, yaw_vel
-Action (3): Δx, Δy, Δyaw  (relative)
+State (3):  yaw_err, yaw_vel, is_grasping
+Action (1): Δyaw  (relative)
+- ee_xy 는 cell_xy 에 고정 (학습 X)
 - ee_z 고정 (= cfg.ee_fixed_z = 0.26)
 - gripper close 고정 (박스 잡힌 상태 유지)
 """
@@ -71,7 +72,7 @@ class InsertEnv(DirectRLEnv):
         ).repeat(self.num_envs, 1)
 
         # internal state (per env)
-        self._ee_target_xy_w = torch.zeros(self.num_envs, 2, device=self.device)
+        # ee_xy 는 cell_xy 에 고정 (학습 X) — _ee_target_xy_w buffer 제거
         self._ee_target_yaw = torch.zeros(self.num_envs, device=self.device)
         self._cell_xy = torch.zeros(self.num_envs, 2, device=self.device)
         self._cell_yaw = torch.zeros(self.num_envs, device=self.device)
@@ -125,13 +126,9 @@ class InsertEnv(DirectRLEnv):
         actions = actions.clamp(-1.0, 1.0)
         self._actions[:] = actions
 
-        ee_pos_w = self._grip_center_pos()
-        delta_xy = actions[:, :2] * self.cfg.action_scale_xy
-        self._ee_target_xy_w = ee_pos_w[:, :2] + delta_xy
-
-        # yaw 비누적: 매 step 현재 ee yaw 기준 재계산 (xy 와 동일 패턴)
+        # yaw 만 학습: 비누적, 매 step 현재 ee yaw 기준 재계산
         cur_ee_yaw = self._extract_ee_yaw()
-        delta_yaw = actions[:, 2] * self.cfg.action_scale_yaw
+        delta_yaw = actions[:, 0] * self.cfg.action_scale_yaw
         self._ee_target_yaw = (cur_ee_yaw + delta_yaw).clamp(
             self.cfg.ee_yaw_min, self.cfg.ee_yaw_max
         )
@@ -139,7 +136,8 @@ class InsertEnv(DirectRLEnv):
     def _apply_action(self) -> None:
         env_origin_z = self.scene.env_origins[:, 2]
         target_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
-        target_pos_w[:, :2] = self._ee_target_xy_w
+        # ee_xy 는 cell_xy 에 고정 (학습 X)
+        target_pos_w[:, :2] = self._cell_xy + self.scene.env_origins[:, :2]
         target_pos_w[:, 2] = self.cfg.ee_fixed_z + env_origin_z
 
         z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, 3)
@@ -215,156 +213,55 @@ class InsertEnv(DirectRLEnv):
 
     # ------------------------------------------------------------
     def _get_observations(self) -> dict:
-        ee_pos_w = self._grip_center_pos()
-        ee_xy_env = ee_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        slot_rel_x = self._cell_xy[:, 0] - ee_xy_env[:, 0]
-        slot_rel_y = self._cell_xy[:, 1] - ee_xy_env[:, 1]
-
-        # actual ee yaw 기반 (xy 와 동일 패턴)
         cur_ee_yaw = self._extract_ee_yaw()
-        slot_yaw_err = wrap_to_pi(self._cell_yaw - cur_ee_yaw)
-
+        yaw_err = wrap_to_pi(self._cell_yaw - cur_ee_yaw)
         is_grasping = self._is_grasping().float()
-
-        ee_vel = self._grip_center_vel()
         yaw_vel = self._ee_ang_vel_z()
 
-        obs = torch.stack(
-            [slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping,
-             ee_vel[:, 0], ee_vel[:, 1], yaw_vel],
-            dim=-1,
-        )
+        obs = torch.stack([yaw_err, yaw_vel, is_grasping], dim=-1)
         return {"policy": obs}
 
     # ------------------------------------------------------------
     def _get_rewards(self) -> torch.Tensor:
-        ee_pos_w = self._grip_center_pos()
-        ee_xy_env = ee_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        slot_rel = self._cell_xy - ee_xy_env  # (N, 2)
-        xy_dist2 = (slot_rel ** 2).sum(dim=-1)
-
         cur_ee_yaw = self._extract_ee_yaw()
         yaw_err = wrap_to_pi(self._cell_yaw - cur_ee_yaw)
-
-        ee_vel = self._grip_center_vel()
-        yaw_vel = self._ee_ang_vel_z()
-
         is_grasping = self._is_grasping()
 
-        # rewards (grasp 와 동일 — mask 없음. drop 은 termination 으로 자연 페널티)
-        # 두 개 exp 합쳐서 — 멀리 가도 작은 신호 (exploration) + 가까이 sharp (정밀 정렬)
-        r_xy_align = torch.exp(-self.cfg.reward_xy_align_gain * xy_dist2)
-        r_xy_align_close = torch.exp(-self.cfg.reward_xy_align_gain_close * xy_dist2)
-        r_yaw_align = torch.exp(-self.cfg.reward_yaw_align_gain * (yaw_err ** 2))
-        r_smooth = -self.cfg.reward_smooth_w * (ee_vel[:, 0] ** 2 + ee_vel[:, 1] ** 2 + yaw_vel ** 2)
-
-        # v19: 거리 페널티 — 1cm 초과 거리 비례 페널티 (1cm 안 유도)
-        xy_dist = torch.sqrt(xy_dist2 + 1e-9)
-        r_far_penalty = -self.cfg.reward_far_penalty_w * torch.clamp(
-            xy_dist - self.cfg.reward_far_threshold, min=0.0
-        )
-
-        # v20: action L2 penalty — 정책이 작은 action 출력 학습 (fine motor)
-        r_action_penalty = -self.cfg.reward_action_penalty_w * (self._actions ** 2).sum(dim=-1)
-
-        # alignment 분리 metric — 학습 진단용 (xy / yaw 어느 쪽 부족인지)
-        xy_aligned = (
-            (slot_rel[:, 0].abs() < self.cfg.align_xy_threshold) &
-            (slot_rel[:, 1].abs() < self.cfg.align_xy_threshold)
-        )
+        r_yaw = torch.exp(-self.cfg.reward_yaw_align_gain * (yaw_err ** 2))
         yaw_aligned = yaw_err.abs() < self.cfg.align_yaw_threshold
-        aligned = xy_aligned & yaw_aligned & is_grasping
+        aligned = yaw_aligned & is_grasping
         r_success = aligned.float() * self.cfg.reward_success_bonus
 
-        will_succeed = aligned & ((self._aligned_count + 1) >= self.cfg.success_hold_steps)
-        r_success_lump = will_succeed.float() * self.cfg.reward_success_lump
-
-        total = r_xy_align + r_xy_align_close + r_yaw_align + r_smooth + r_success + r_success_lump + r_action_penalty
-
-        # v19+ 진단: 발산/안정성 metric
-        ee_speed = torch.sqrt(ee_vel[:, 0] ** 2 + ee_vel[:, 1] ** 2 + 1e-9)
-        action_norm = torch.norm(self._actions, dim=-1)
-        far_rate = (xy_dist > 0.05).float().mean()        # 5cm 이상 비율
-        very_far_rate = (xy_dist > 0.08).float().mean()   # 8cm (발산 직전) 비율
-        close_rate = (xy_dist < 0.02).float().mean()      # 2cm 이내 비율
-        # box vs ee yaw mismatch (slip 정도)
-        box_yaw = self._extract_box_yaw_if_available()
-        if box_yaw is not None:
-            box_ee_yaw_diff = wrap_to_pi(box_yaw - cur_ee_yaw).abs().mean()
-        else:
-            box_ee_yaw_diff = torch.tensor(0.0, device=self.device)
+        total = r_yaw + r_success
 
         self.reward_log = {
-            "r_xy_align": float(r_xy_align.mean().item()),
-            "r_xy_align_close": float(r_xy_align_close.mean().item()),
-            "r_yaw_align": float(r_yaw_align.mean().item()),
-            "r_smooth": float(r_smooth.mean().item()),
+            "r_yaw": float(r_yaw.mean().item()),
             "r_success": float(r_success.mean().item()),
-            "r_success_lump": float(r_success_lump.mean().item()),
-            "r_far_penalty": float(r_far_penalty.mean().item()),
-            "r_action_penalty": float(r_action_penalty.mean().item()),
-            # 진단 metric — 어느 정렬 조건 부족인지
-            "xy_aligned_rate": float(xy_aligned.float().mean().item()),
             "yaw_aligned_rate": float(yaw_aligned.float().mean().item()),
             "aligned_rate": float(aligned.float().mean().item()),
             "is_grasping_rate": float(is_grasping.float().mean().item()),
-            # 평균 거리 (학습 중 줄어드는지)
-            "xy_dist_mean": float(torch.sqrt(xy_dist2 + 1e-9).mean().item()),
             "yaw_err_abs_mean": float(yaw_err.abs().mean().item()),
-            # v19+ 발산/안정성 진단
-            "far_rate_5cm": float(far_rate.item()),
-            "very_far_rate_8cm": float(very_far_rate.item()),
-            "close_rate_2cm": float(close_rate.item()),
-            "ee_speed_mean": float(ee_speed.mean().item()),
-            "ee_speed_max": float(ee_speed.max().item()),
-            "action_norm_mean": float(action_norm.mean().item()),
-            "action_norm_max": float(action_norm.max().item()),
-            "box_ee_yaw_diff_rad": float(box_ee_yaw_diff.item()),
         }
         return total
 
-    def _extract_box_yaw_if_available(self) -> torch.Tensor | None:
-        """box quat → world Z yaw (있으면)."""
-        try:
-            q = self._object.data.root_quat_w  # (N, 4) wxyz
-            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-            return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-        except Exception:
-            return None
-
     # ------------------------------------------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        ee_pos_w = self._grip_center_pos()
-        ee_xy_env = ee_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        slot_rel = self._cell_xy - ee_xy_env
-
         cur_ee_yaw = self._extract_ee_yaw()
         yaw_err = wrap_to_pi(self._cell_yaw - cur_ee_yaw)
-
         is_grasping = self._is_grasping()
 
-        aligned = (
-            (slot_rel[:, 0].abs() < self.cfg.align_xy_threshold) &
-            (slot_rel[:, 1].abs() < self.cfg.align_xy_threshold) &
-            (yaw_err.abs() < self.cfg.align_yaw_threshold) &
-            is_grasping
-        )
+        aligned = (yaw_err.abs() < self.cfg.align_yaw_threshold) & is_grasping
         self._aligned_count = torch.where(
             aligned, self._aligned_count + 1, torch.zeros_like(self._aligned_count)
         )
         success = self._aligned_count >= self.cfg.success_hold_steps
 
-        # fail: 박스 떨어뜨림 또는 ee 가 셀에서 너무 멀어짐
+        # fail: 박스 떨어뜨림만 (ee_xy 는 cell_xy 고정이라 too_far 불필요)
         env_origin_z = self.scene.env_origins[:, 2]
         box_z_env = self._object.data.root_pos_w[:, 2] - env_origin_z
         dropped = box_z_env < self.cfg.box_drop_z_threshold
-        too_far = (
-            (slot_rel[:, 0].abs() > self.cfg.fail_xy_threshold) |
-            (slot_rel[:, 1].abs() > self.cfg.fail_xy_threshold)
-        )
-        failed = dropped | too_far
 
-        terminated = success | failed
+        terminated = success | dropped
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -414,14 +311,12 @@ class InsertEnv(DirectRLEnv):
         )
 
         # ---- 내부 상태 적용 ----
-        # _ee_target_xy_w / _ee_target_yaw 는 첫 _pre_physics_step 호출에서 actual ee 기준으로
-        # 재계산되므로 placeholder 만 두면 됨 (handoff 자세 그대로)
+        # _ee_target_yaw 는 첫 _pre_physics_step 호출에서 actual ee yaw 기준으로 재계산됨
         self._cell_xy[env_ids_t] = cell_xy_d
         self._cell_yaw[env_ids_t] = cell_yaw_d
         self._ee_target_yaw[env_ids_t] = ee_target_yaw_d.clamp(
             self.cfg.ee_yaw_min, self.cfg.ee_yaw_max
         )
-        self._ee_target_xy_w[env_ids_t] = cell_xy_d + self.scene.env_origins[env_ids_t, :2]
 
         self._aligned_count[env_ids_t] = 0
 

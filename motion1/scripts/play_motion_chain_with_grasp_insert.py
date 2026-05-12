@@ -1,13 +1,13 @@
-"""motion1 — Motion chain + Grasp RL + Insert RL 통합 (6단계).
+"""motion1 — Motion chain + Grasp RL + Insert RL 통합 (6단계, yaw-only insert).
 
 play_motion_chain_with_grasp.py 의 확장:
  - 박스 spawn: xy ±10cm, yaw ±80° random (grasp 학습 cfg 와 동일)
- - **셀 spawn: xy ±10cm, yaw ±80° random** (cell wall 4개 random pose)
+ - **셀 spawn: xy ±5cm, yaw ±80° random** (cell wall 4개 random pose)
  - 단계 1: home → 박스 + 3~5cm offset (motion + slerp)
  - 단계 2: **Grasp RL inference** (정렬+잡기)
  - 단계 3a-c: descend → close → lift (motion)
- - 단계 3d: transport → cell + 3~5cm offset (motion + ee yaw → cell yaw)
- - 단계 4: **Insert RL inference** (정렬)
+ - 단계 3d: transport → cell xy 정확히, ee_yaw → 0 (motion, slerp)
+ - 단계 4: **Insert RL inference** (yaw 정렬만, 학습 분포와 일치)
  - 단계 5a-b: insert descend → release (motion)
  - 단계 6a-b: retract up → home (motion)
 
@@ -64,12 +64,12 @@ from stable_baselines3 import PPO
 from source.omy.omy_robot_cfg import OMY_OFF_SELF_COLLISION_CFG
 
 # -------------------- constants (env-relative coords) --------------------
-BOX_SPAWN = (0.30, -0.10, 0.07)
+BOX_SPAWN = (0.45, 0.10, 0.07)    # swap: cell 자리로 (오른쪽 위)
 BOX_SIZE = (0.139, 0.044, 0.118)
 BOX_MASS = 0.3
 
-CELL_CENTER_X = 0.30
-CELL_CENTER_Y = -0.30
+CELL_CENTER_X = 0.35              # swap: box 자리로 (왼쪽 앞)
+CELL_CENTER_Y = -0.20
 CELL_INNER_X = 0.16
 CELL_INNER_Y = 0.065
 WALL_THICKNESS = 0.008
@@ -78,7 +78,7 @@ WALL_HEIGHT = 0.12
 # z 좌표
 # BOX_SPAWN[2] = 0.07
 PRE_GRASP_Z = BOX_SPAWN[2] + 0.10        # 0.17 — grasp RL 학습의 ee_fixed_z 와 동일
-GRASP_Z     = BOX_SPAWN[2] + 0.045        # 0.13
+GRASP_Z     = BOX_SPAWN[2] + 0.058        # 0.13
 LIFT_Z      = 0.26
 TRANSPORT_Z = 0.26
 PLACE_Z     = BOX_SPAWN[2] + 0.095       # 0.165
@@ -113,15 +113,21 @@ CELL_SPAWN_YAW_MAX  = 1.396      # ±80°
 EE_OFFSET_MIN_M = 0.03
 EE_OFFSET_MAX_M = 0.05
 
-# 단계 3d 끝 transport noise (~1cm) — RL 정책이 fine 정렬만 하도록
-INSERT_OFFSET_MIN_M = 0.005
-INSERT_OFFSET_MAX_M = 0.01
+# 단계 3d 끝 transport — yaw 학습 단순 버전: xy noise 0 (cell xy 정확히 도달)
+# RL 은 yaw 만 정렬
+INSERT_OFFSET_MIN_M = 0.0
+INSERT_OFFSET_MAX_M = 0.0
 
-# RL action scale — grasp 와 insert 학습 cfg 가 다름 분리
+# RL action scale
 RL_GRASP_ACTION_SCALE_XY = 0.01    # grasp_env_cfg: 10mm/step
 RL_GRASP_ACTION_SCALE_YAW = 0.05   # grasp_env_cfg: ~2.86°/step
-RL_INSERT_ACTION_SCALE_XY = 0.005  # insert_env_cfg: 5mm/step (변경됨)
-RL_INSERT_ACTION_SCALE_YAW = 0.05  # insert_env_cfg: ~2.86°/step
+RL_INSERT_ACTION_SCALE_YAW = 0.05  # insert_env_cfg: ~2.86°/step (yaw-only)
+
+# Insert 시 ee target offset (box 가 cell 중앙에 정렬 안 되면 보정)
+# **cell frame 기준** (cell_yaw 따라 회전됨) — 박스가 그리퍼에 빗나가게 잡힌 방향과 일치
+# +X = cell 의 long axis (+x) 방향, +Y = cell 의 short axis (+y) 방향
+INSERT_TARGET_X_OFFSET = 0.0     # cell 길이축 (long edge) 방향 보정
+INSERT_TARGET_Y_OFFSET = 0.02     # cell 폭축 (short edge) 방향 보정
 
 # RL ee yaw clip (학습 cfg 와 동일)
 RL_EE_YAW_MIN = -1.5708
@@ -133,10 +139,9 @@ RL_GRASP_ALIGN_XY = 0.005       # 5mm
 RL_GRASP_ALIGN_YAW = 0.05       # ~2.86°
 RL_GRASP_HOLD_STEPS = 30        # 30 step (0.5초)
 
-# Insert RL success 판정 (완화 — insert_env_cfg 와 일치)
-RL_INSERT_ALIGN_XY = 0.010      # 10mm
-RL_INSERT_ALIGN_YAW = 0.087     # ~5°
-RL_INSERT_HOLD_STEPS = 15       # 15 step (0.25초)
+# Insert RL success 판정 (yaw-only, insert_env_cfg 와 일치)
+RL_INSERT_ALIGN_YAW = 0.052     # ~3°
+RL_INSERT_HOLD_STEPS = 30       # 30 step (0.5초)
 
 # 셀 벽 사이즈 / 위치
 _V_WALL_SIZE = (WALL_THICKNESS, CELL_INNER_Y + 2 * WALL_THICKNESS, WALL_HEIGHT)
@@ -515,9 +520,12 @@ def run_pipeline(sim, scene):
         report("2. RL grasp align")
         return ee_target_yaw, success
 
-    # ---- Stage 4: 학습된 insert RL 정책 inference ----
+    # ---- Stage 4: 학습된 insert RL 정책 inference (yaw-only) ----
     def stage_rl_insert(max_steps: int, cell_xy_v, cell_yaw_v: float) -> bool:
-        """학습된 PPO 정책으로 cell xy/yaw 미세 정렬. yaw 비누적, ee_z=TRANSPORT_Z 고정.
+        """학습된 PPO 정책으로 cell yaw 정렬. yaw 비누적, ee_xy=cell_xy / ee_z=TRANSPORT_Z 고정.
+
+        Obs (3): yaw_err, yaw_vel, is_grasping
+        Action (1): Δyaw
 
         cell_xy_v: (cell_x, cell_y) env-rel float tuple
         cell_yaw_v: float
@@ -525,56 +533,45 @@ def run_pipeline(sim, scene):
         aligned_count = 0
         success = False
 
-        print(f"[stage] 4. RL insert align (PPO inference) | max_steps={max_steps}")
+        print(f"[stage] 4. RL insert align (PPO inference, yaw-only) | max_steps={max_steps}")
         z_axis_t = torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)
 
         for step_i in range(max_steps):
-            # ---- state 계산 (insert_env._get_observations 와 동일 식) ----
-            ee_pos_w = grip_center_pos(robot, left_id, right_id)
-            ee_xy_env = ee_pos_w[:, :2] - scene.env_origins[:, :2]
-            slot_rel_x = float(cell_xy_v[0] - ee_xy_env[0, 0].item())
-            slot_rel_y = float(cell_xy_v[1] - ee_xy_env[0, 1].item())
-
-            # actual ee yaw (insert env 와 동일 공식)
+            # ---- state 계산 (insert_env._get_observations 와 동일 식, 3차원) ----
             ee_quat_w = grip_center_quat(robot, left_id)
             cur_ee_yaw = quat_z_yaw(ee_quat_w)[0].item()
-            slot_yaw_err = float(wrap_to_pi(
+            yaw_err = float(wrap_to_pi(
                 torch.tensor([cell_yaw_v - cur_ee_yaw])).item())
 
-            # is_grasping = 1 (chain runner 에서 박스 잡혀 있다고 가정)
-            is_grasping = 1.0
-
-            ee_vel = grip_center_lin_vel(robot, left_id, right_id)
-            ee_vel_x = ee_vel[0, 0].item()
-            ee_vel_y = ee_vel[0, 1].item()
-
-            # actual ang vel z (yaw rate)
+            # yaw rate (insert env 와 동일: 양 finger 의 ang_vel z 평균)
             ang_l = robot.data.body_ang_vel_w[0, left_id, 2].item()
             ang_r = robot.data.body_ang_vel_w[0, right_id, 2].item()
             yaw_vel = 0.5 * (ang_l + ang_r)
 
-            obs_np = np.array(
-                [slot_rel_x, slot_rel_y, slot_yaw_err, is_grasping,
-                 ee_vel_x, ee_vel_y, yaw_vel],
-                dtype=np.float32,
-            )
+            # is_grasping = 1 (chain runner 에서 박스 잡혀 있다고 가정)
+            is_grasping = 1.0
+
+            obs_np = np.array([yaw_err, yaw_vel, is_grasping], dtype=np.float32)
             obs_norm = insert_normalize_obs(obs_np)
 
             action, _ = insert_model.predict(obs_norm, deterministic=True)
             action = np.clip(action, -1.0, 1.0)
 
-            # ---- action 적용 (insert_env 와 동일 — 비누적 xy + 비누적 yaw) ----
-            delta_xy = action[:2] * RL_INSERT_ACTION_SCALE_XY
-            ee_target_xy_w_now = (
-                ee_pos_w[0, :2] + torch.tensor(delta_xy, device=device, dtype=torch.float))
-
-            delta_yaw = float(action[2]) * RL_INSERT_ACTION_SCALE_YAW
+            # ---- action 적용 (insert_env 와 동일 — Δyaw 만, 비누적) ----
+            delta_yaw = float(action[0]) * RL_INSERT_ACTION_SCALE_YAW
             new_yaw = max(RL_EE_YAW_MIN, min(RL_EE_YAW_MAX, cur_ee_yaw + delta_yaw))
 
+            # xy 는 cell_xy + 보정 offset (cell frame 기준, cell_yaw 따라 회전)
+            # box 가 그리퍼 안에서 cell long-axis (+x) 쪽으로 빗나가있으면 offset 그 방향
+            cos_y = math.cos(cell_yaw_v)
+            sin_y = math.sin(cell_yaw_v)
+            dx_world = cos_y * INSERT_TARGET_X_OFFSET - sin_y * INSERT_TARGET_Y_OFFSET
+            dy_world = sin_y * INSERT_TARGET_X_OFFSET + cos_y * INSERT_TARGET_Y_OFFSET
             target_pos_env = torch.tensor(
-                [ee_target_xy_w_now[0].item() - env_origin[0].item(),
-                 ee_target_xy_w_now[1].item() - env_origin[1].item(),
-                 TRANSPORT_Z], device=device, dtype=torch.float)
+                [cell_xy_v[0] + dx_world,
+                 cell_xy_v[1] + dy_world,
+                 TRANSPORT_Z],
+                device=device, dtype=torch.float)
 
             yaw_q = quat_from_angle_axis(
                 torch.tensor([new_yaw], device=device, dtype=torch.float),
@@ -583,12 +580,8 @@ def run_pipeline(sim, scene):
 
             control_step(target_pos_env, gripper_close, target_quat_w=ee_quat_now)
 
-            # ---- aligned 판정 ----
-            aligned = (
-                abs(slot_rel_x) < RL_INSERT_ALIGN_XY and
-                abs(slot_rel_y) < RL_INSERT_ALIGN_XY and
-                abs(slot_yaw_err) < RL_INSERT_ALIGN_YAW
-            )
+            # ---- aligned 판정 (yaw 만) ----
+            aligned = abs(yaw_err) < RL_INSERT_ALIGN_YAW
             if aligned:
                 aligned_count += 1
                 if aligned_count >= RL_INSERT_HOLD_STEPS:
@@ -756,14 +749,14 @@ def run_pipeline(sim, scene):
                    "3c. Lift",
                    start_quat_w=ee_quat_after_align, end_quat_w=ee_quat_after_align)
 
-        # ---- 3d. Transport → cell + insert offset, yaw → cell_yaw ----
-        # transport 도중 ee yaw (박스 yaw 따라가던) → cell_yaw 점진적 회전.
-        # 박스도 같이 회전 → cell yaw 정렬됨.
+        # ---- 3d. Transport → cell xy 정확히, ee yaw → 0 (cell_yaw 회전은 stage 4 RL 이 담당) ----
+        # transport 도중 ee yaw → 0 (학습 환경과 일치). 박스도 같이 회전 → box yaw = 0.
+        # cell_yaw 정렬은 다음 stage RL 의 학습 대상.
         stage_move(lift_pos, transport_offset,
                    STAGE_DURATION_S["transport"], gripper_close,
-                   "3d. Transport + yaw align (→ cell yaw)",
+                   "3d. Transport (yaw → 0)",
                    start_quat_w=ee_quat_after_align,
-                   end_quat_w=cell_ee_quat)
+                   end_quat_w=base_ee_quat)
 
         # ---- 4. Insert RL align (PPO inference) ----
         insert_success = stage_rl_insert(args_cli.rl_max_steps, (cx, cy), cyaw)

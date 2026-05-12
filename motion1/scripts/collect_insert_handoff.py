@@ -1,19 +1,20 @@
-"""motion1 — Insert RL 학습용 handoff dataset 수집.
+"""motion1 — Insert RL 학습용 handoff dataset 수집 (yaw-only 단순 버전).
 
 play_motion_chain_with_grasp.py 와 같은 chain 시뮬을 N 회 반복하면서,
-**셀 yaw 도 random ±80°** 으로 spawn → stage 3d 끝 (박스 잡힌 채 셀 위 + yaw 정렬) 의 자세 저장.
+**셀 yaw 만 random ±80°** 으로 spawn → stage 3d 끝 (박스 잡힌 채 cell xy 정확히 도달,
+ee_yaw = 0 유지) 의 자세 저장. yaw 정렬은 RL 의 학습 대상.
 
 저장 항목 (per episode):
  - joint_pos (10): arm 6 + gripper 4
- - box_pos_env (3) + box_quat_w (4)
- - cell_xy (2) + cell_yaw (1)
- - ee_target_yaw_at_handoff (1) — stage 3d 끝의 ee target yaw (= cell_yaw + 작은 chain 결과)
+ - box_pos_env (3) + box_quat_w (4)   # box yaw = 0 (ee 따라 회전됨)
+ - cell_xy (2) + cell_yaw (1)         # cell_yaw 가 RL 의 yaw target
+ - ee_target_yaw_at_handoff (1) = 0   # handoff 시 ee_yaw = 0 fixed
 
 저장 파일: checkpoints/insert_handoff_states.npz
 
 실행:
     ./isaaclab.sh -p source/motion1/scripts/collect_insert_handoff.py \\
-        --headless --num_envs 32 --target 5000 --hold_s 0
+        --headless --target 1000 --hold_s 0
 """
 from __future__ import annotations
 
@@ -451,21 +452,17 @@ def run_collect(sim, scene):
                    STAGE_DURATION_S["lift"], gripper_close,
                    start_quat_w=ee_quat_after_align, end_quat_w=ee_quat_after_align)
 
-        # Stage 3d: transport + yaw → cell_yaw 정렬 (v14 방식 복원)
-        cell_target_quat = quat_mul(
-            quat_from_angle_axis(
-                torch.tensor([cyaw], device=device, dtype=torch.float),
-                torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)),
-            base_ee_quat)
-        tx_off, ty_off = random_ee_offset()
+        # Stage 3d: transport → cell xy 정확히 (xy noise 0), ee_yaw → 0 (cell_yaw 회전 X)
+        # yaw 만 학습용: handoff 시 ee_yaw=0, cell_yaw 은 random ±80° 그대로.
+        # 따라서 yaw_err 시작값 = cell_yaw (학습 신호 큼)
         transport_pos = torch.tensor(
-            [cx + tx_off, cy + ty_off, TRANSPORT_Z],
+            [cx, cy, TRANSPORT_Z],
             device=device, dtype=torch.float,
         )
         stage_move(lift_pos, transport_pos,
                    STAGE_DURATION_S["transport"], gripper_close,
                    start_quat_w=ee_quat_after_align,
-                   end_quat_w=cell_target_quat)
+                   end_quat_w=base_ee_quat)
 
         # ---- handoff state 저장 ----
         joint_pos_now = robot.data.joint_pos[0].cpu().numpy().astype(np.float32)
@@ -474,7 +471,7 @@ def run_collect(sim, scene):
         box_quat_now = box.data.root_quat_w[0].cpu().numpy().astype(np.float32)
         cell_xy_arr = np.array([cx, cy], dtype=np.float32)
         cell_yaw_arr = np.array([cyaw], dtype=np.float32)
-        ee_target_yaw_arr = np.array([cyaw], dtype=np.float32)  # v14: ee_target_yaw = cell_yaw
+        ee_target_yaw_arr = np.array([0.0], dtype=np.float32)  # yaw 학습: handoff 시 ee_yaw=0
 
         out_joint_pos.append(joint_pos_now)
         out_box_pos_env.append(box_pos_env_now)

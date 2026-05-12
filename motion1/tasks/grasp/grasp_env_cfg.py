@@ -93,7 +93,7 @@ class GraspEnvCfg(DirectRLEnvCfg):
                 dynamic_friction=3.0,
             ),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, -0.10, 0.07)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, 0.10, 0.07)),
     )
 
     # =========================
@@ -118,8 +118,8 @@ class GraspEnvCfg(DirectRLEnvCfg):
     # ee 가 고정으로 유지하는 z (motion-only 의 PRE_GRASP_Z 와 동일)
     ee_fixed_z: float = 0.17
 
-    # 박스 spawn (env-rel)
-    box_spawn_xy: tuple[float, float] = (0.45, -0.10)
+    # 박스 spawn (env-rel) — chain runner 와 동기화 (y +0.10)
+    box_spawn_xy: tuple[float, float] = (0.45, 0.10)
     box_spawn_z: float = 0.07
     box_spawn_xy_noise: float = 0.1      # 박스 생성 노이즈 ±10cm
     box_spawn_yaw_max: float = 1.396     # 박스 생성 노이즈 ±80° (= 1.396 rad)

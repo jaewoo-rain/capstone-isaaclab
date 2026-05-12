@@ -1,30 +1,35 @@
-"""motion1 — Motion chain + Grasp RL (손목 카메라 obs) + Insert RL (yaw-only).
+"""motion1 — Motion chain (vision-only, 천장 + 손목 cam).
 
-카메라 버전 + 학습된 insert RL 정책 (yaw 정렬) 통합. play_motion_chain_with_grasp_insert.py
-와 환경 동일 — BOX/CELL 위치, GRASP_Z, INSERT_TARGET offset, transport yaw=0 etc.
+play_motion_chain_with_grasp_insert_camera.py 의 vision-only 버전:
+ - **GT fallback 제거** — YOLO 검출 실패 시 그 run skip
+ - `--use_vision` flag 제거 (항상 vision)
+ - `EE_OFFSET = 0` — 카메라 추정 좌표로 직행, 추가 random noise 없음
+ - 손목 cam 으로 cell yaw 도 재추정 (stage 4)
+ - `--no_rl` flag: RL 정책 두 stage 다 skip → pure vision + motion
 
-카메라 구성:
- 1. **천장 cam** (top_cam): run 시작 시 1회 scan → 박스 xy + 셀 xy/yaw 추정.
- 2. **손목 cam** (wrist_cam, link6 부착, URDF 와 일치): grasp RL inference 매 step →
-    박스 xy/yaw 추정 → 기존 6-d state obs 채움.
+카메라:
+ - **천장 cam** (top_cam): run 시작 시 1회 scan → 박스 xy/yaw + 셀 xy/yaw (YOLO class 0/1).
+ - **손목 cam** (wrist_cam, link6 부착): grasp/insert stage 에서 매 step (RL) 또는 단발 (no_rl) refine.
 
 흐름:
-    1. (run start) 천장 cam scan → 박스/셀 pose 추정.
-    2. 룰베이스 motion: home → 박스 위 (천장 cam 의 박스 xy 사용, 3~5cm 노이즈)
-    3. **Grasp RL** (손목 cam → 박스 pose detect → 기존 정책 obs 식)
-    4. 룰베이스: descend → close → lift
-    5. 룰베이스: transport → cell xy 정확히, ee_yaw → 0
-    6. **Insert RL** (yaw-only, ee_xy 는 cell_xy + offset 에 고정)
-    7. 룰베이스: insert descend → release
-    8. 룰베이스: retract up → home
+    1. 천장 cam scan → 박스/셀 pose 추정 (검출 실패 시 run skip)
+    2. Stage 1 motion: home → 박스 위 (offset 0, vision 좌표 직행)
+    3. Stage 2:
+       - default: Grasp RL (손목 cam yaw 매 step refine → 정책 obs)
+       - `--no_rl`: 손목 cam 단발 refine → motion 으로 ee yaw 정렬
+    4. Stage 3a-c: descend → close → lift
+    5. Stage 3d: transport → cell xy, ee_yaw → 0
+    6. Stage 4:
+       - default: Insert RL (yaw-only, 손목 cam 으로 cell_yaw 매 step refine)
+       - `--no_rl`: 손목 cam 단발 refine → motion 으로 ee yaw 정렬
+    7. Stage 5a-b: insert descend → release
+    8. Stage 6a-b: retract up → home
 
-`--use_vision` 으로 vision/ground-truth obs source 전환. default OFF (안전, GT 사용).
-
-실행 (camera 활성화 필수):
-    ./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp_insert_camera.py \
-        --enable_cameras --hold_s 30 --save_camera_debug
-    ./isaaclab.sh -p source/motion1/scripts/play_motion_chain_with_grasp_insert_camera.py \
-        --enable_cameras --use_vision --repeat 5 --hold_s 5
+실행:
+    ./isaaclab.sh -p source/motion1/scripts/play_motion_chain_vision.py \\
+        --enable_cameras --repeat 5 --hold_s 5
+    ./isaaclab.sh -p source/motion1/scripts/play_motion_chain_vision.py \\
+        --enable_cameras --no_rl --repeat 5 --hold_s 5
 """
 from __future__ import annotations
 
@@ -45,14 +50,15 @@ parser.add_argument("--insert_checkpoint", type=str, default="checkpoints/motion
 parser.add_argument("--insert_vecnorm",    type=str, default="checkpoints/motion1_insert_vecnorm.pkl")
 parser.add_argument("--rl_max_steps", type=int, default=300)
 parser.add_argument("--seed", type=int, default=None)
-parser.add_argument("--use_vision", action="store_true",
-                    help="천장+손목 cam 추정값을 RL/motion 의 obs source 로 사용 "
-                         "(default=False, ground truth 사용)")
+parser.add_argument("--no_rl", action="store_true",
+                    help="RL 정책 두 stage 다 skip — pure vision + motion 만으로 진행")
 parser.add_argument("--yolo_ckpt", type=str, default=None,
-                    help="지정 시 박스 mask 를 YOLO seg inference 로 (default=sim mask). "
+                    help="YOLO seg weights 경로 (없으면 default 모델). "
                          "예: runs/segment/source/motion1/yolo_runs/v1_seg/weights/best.pt")
 parser.add_argument("--save_camera_debug", action="store_true",
                     help="scan 시 RGB/seg 이미지를 /tmp/motion1_cam_*.png 에 저장")
+parser.add_argument("--csv_out", type=str, default=None,
+                    help="벤치마크 CSV 저장 경로 (예: /tmp/bench_no_rl.csv)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -160,9 +166,9 @@ BOX_SPAWN_XY_NOISE = 0.00
 BOX_SPAWN_YAW_MAX  = 1.396
 CELL_SPAWN_XY_NOISE = 0.05       # ±5cm (insert dataset 분포 와 일치)
 CELL_SPAWN_YAW_MAX  = 1.396      # ±80°
-# Stage 1 끝 ee offset 3~5cm random — grasp 학습 분포와 일치 (vision noise 모사)
-EE_OFFSET_MIN_M = 0.03
-EE_OFFSET_MAX_M = 0.05
+# Stage 1 끝 ee offset 0 — vision 좌표로 직행 (random noise 추가 X)
+EE_OFFSET_MIN_M = 0.0
+EE_OFFSET_MAX_M = 0.0
 # Insert (transport 끝점) offset 0 — yaw-only 학습 환경과 일치 (cell xy 정확히)
 INSERT_OFFSET_MIN_M = 0.0
 INSERT_OFFSET_MAX_M = 0.0
@@ -182,8 +188,8 @@ RL_INSERT_HOLD_STEPS = 30       # 30 step (0.5초)
 
 # Insert 시 ee target offset (cell frame 기준, cell_yaw 따라 회전)
 # +X = cell long axis, +Y = cell short axis
-INSERT_TARGET_X_OFFSET = 0.0     # m
-INSERT_TARGET_Y_OFFSET = 0.01    # 0.02 m, cell short-axis (박스가 그리퍼에 빗나가게 잡힌 방향 보정)
+INSERT_TARGET_X_OFFSET = -0.005     # -0.005: 아래로
+INSERT_TARGET_Y_OFFSET = 0.03    # 0.02 m, cell short-axis (박스가 그리퍼에 빗나가게 잡힌 방향 보정)
 
 _V_WALL_SIZE = (WALL_THICKNESS, CELL_INNER_Y + 2 * WALL_THICKNESS, WALL_HEIGHT)
 _H_WALL_SIZE = (CELL_INNER_X + 2 * WALL_THICKNESS, WALL_THICKNESS, WALL_HEIGHT)
@@ -427,7 +433,8 @@ def _unproject_pixel_to_world(
 def _world_yaw_from_image_angle_topdown(angle_deg_image: float) -> float:
     """천장 cam (180° about X). image x = world x, image y = world -y → world yaw = -image angle.
 
-    minAreaRect 의 angle ∈ (0°, 180°] (w<h 보정 후) — long-edge ±π 모호. Wrap (-π/2, π/2].
+    minAreaRect 의 angle ∈ (0°, 180°] (w<h 보정 후) — long-edge 가 ±π 모호.
+    Wrap to (-π/2, π/2] for canonical yaw.
     """
     yaw = -math.radians(angle_deg_image)
     if yaw > math.pi / 2:
@@ -517,7 +524,7 @@ def run_pipeline(sim, scene):
     home_grip_quat_w = grip_center_quat(robot, left_id)[0]
     home_grip_env = home_grip_w - env_origin
     print(f"[chain+rl+cam2] home grip env-rel: {home_grip_env.tolist()}")
-    print(f"[chain+rl+cam2] use_vision={args_cli.use_vision}")
+    print(f"[chain+vision] vision=ON (always), no_rl={args_cli.no_rl}")
 
     base_ee_quat = torch.tensor([[0.0, 1.0, 0.0, 0.0]], device=device)
     gripper_close = float(args_cli.gripper_close)
@@ -827,67 +834,125 @@ def run_pipeline(sim, scene):
 
         return bx_env, by_env, bx_yaw
 
-    # ============= Grasp RL (손목 cam obs source, optional) =============
-    def stage_rl_grasp(max_steps: int, use_vision: bool,
-                       fallback_box_xy_env: tuple[float, float],
-                       fallback_box_yaw: float,
+    # ============= 손목 cam → cell pose 추정 (insert 매 step) =============
+    _wrist_cell_ids: list[int] = []
+
+    def wrist_cam_estimate_cell() -> tuple[float, float, float] | None:
+        """현재 손목 cam 에서 cell detection → (cell_x_env, cell_y_env, cell_yaw).
+
+        검출 실패 시 None.
+        """
+        if wrist_cam is None:
+            return None
+        _update_wrist_cam_pose()
+        wrist_cam.update(dt=control_dt, force_recompute=True)
+        if "distance_to_image_plane" not in wrist_cam.data.output:
+            return None
+        depth0 = wrist_cam.data.output["distance_to_image_plane"][0].squeeze(-1)
+        K = wrist_cam.data.intrinsic_matrices[0]
+        cam_pos_w = wrist_cam.data.pos_w[0]
+        cam_quat = wrist_cam.data.quat_w_world[0]
+
+        # YOLO cell (class_id=1) 우선, 없으면 sim seg (4 wall → morph close)
+        mask = None
+        if _yolo_model is not None and "rgb" in wrist_cam.data.output:
+            rgb = wrist_cam.data.output["rgb"][0].cpu().numpy()
+            if rgb.shape[-1] >= 3:
+                rgb = rgb[..., :3]
+            mask = yolo_predict_mask(rgb, class_id=1)
+        if mask is None:
+            if "instance_id_segmentation_fast" not in wrist_cam.data.output:
+                return None
+            seg = wrist_cam.data.output["instance_id_segmentation_fast"][0].squeeze(-1).cpu().numpy().astype(np.int32)
+            info_dict = wrist_cam.data.info[0].get("instance_id_segmentation_fast", {})
+            id_map = _id_to_path_mapping(info_dict)
+            nonlocal _wrist_cell_ids
+            if not _wrist_cell_ids:
+                _wrist_cell_ids = [i for i, p in id_map.items() if "CellWall" in p]
+                if _wrist_cell_ids:
+                    print(f"  [wrist_cam] cell wall ids cached: {_wrist_cell_ids}")
+            if not _wrist_cell_ids:
+                return None
+            wall_mask = np.isin(seg, _wrist_cell_ids)
+            kern = np.ones((9, 9), np.uint8)
+            mask = cv2.morphologyEx((wall_mask.astype(np.uint8) * 255), cv2.MORPH_CLOSE, kern) > 0
+
+        mask_u8 = mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        cnt = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(cnt) < 50:
+            return None
+        rect = cv2.minAreaRect(cnt)
+        (cx_px, cy_px), (w_rect, h_rect), _ang_img = rect
+        box_pts = cv2.boxPoints(rect)
+
+        z_known = WALL_TOP_Z + env_origin[2].item()
+        cam_z_w_val = float(cam_pos_w[2].item())
+        wx, wy, _ = _unproject_pixel_to_world(
+            float(cx_px), float(cy_px), depth0, K, cam_pos_w, cam_quat,
+            z_known=z_known, cam_z_w=cam_z_w_val)
+        cx_env_v = wx - env_origin[0].item()
+        cy_env_v = wy - env_origin[1].item()
+
+        edge_01 = float(np.linalg.norm(box_pts[0] - box_pts[1]))
+        edge_12 = float(np.linalg.norm(box_pts[1] - box_pts[2]))
+        if edge_01 >= edge_12:
+            p1, p2 = box_pts[0], box_pts[1]
+        else:
+            p1, p2 = box_pts[1], box_pts[2]
+        w1x, w1y, _ = _unproject_pixel_to_world(
+            float(p1[0]), float(p1[1]), depth0, K, cam_pos_w, cam_quat,
+            z_known=z_known, cam_z_w=cam_z_w_val)
+        w2x, w2y, _ = _unproject_pixel_to_world(
+            float(p2[0]), float(p2[1]), depth0, K, cam_pos_w, cam_quat,
+            z_known=z_known, cam_z_w=cam_z_w_val)
+        cy_yaw_v = math.atan2(w2y - w1y, w2x - w1x)
+        cy_yaw_v = float(wrap_to_pi(torch.tensor([cy_yaw_v])).item())
+        if cy_yaw_v > math.pi / 2:
+            cy_yaw_v -= math.pi
+        elif cy_yaw_v < -math.pi / 2:
+            cy_yaw_v += math.pi
+
+        return cx_env_v, cy_env_v, cy_yaw_v
+
+    # ============= Grasp RL (천장 cam scan 결과 만 사용) =============
+    def stage_rl_grasp(max_steps: int,
+                       top_box_xy_env: tuple[float, float],
+                       top_box_yaw: float,
                        rep_idx: int = 0) -> tuple[float, bool]:
+        """학습된 PPO 정책으로 박스 정렬 (vision-only, 천장 cam 만).
+
+        box xy + yaw 둘 다 천장 cam scan 결과 (run 시작 시 추정) 그대로 사용.
+        매 step 정책에 같은 (top_box_xy_env, top_box_yaw) feed.
+        """
         ee_target_yaw = 0.0
         prev_ee_target_yaw = 0.0
         aligned_count = 0
         success = False
+        box_x_env_v, box_y_env_v = top_box_xy_env
+        box_yaw_v = top_box_yaw
 
-        src = "wrist_cam" if use_vision else "ground_truth"
-        print(f"[stage] 2. RL grasp align (PPO inference)  | max_steps={max_steps} obs_src={src}")
+        print(f"[stage] 2. RL grasp align (PPO, top_cam only) | max_steps={max_steps}")
         sim_dt_ctrl = dt
 
         for step_i in range(max_steps):
-            if step_i == 0:
-                _save_wrist_overlay(f"grasp_first_run{rep_idx}")
-                # ---- DBG: wrist cam pose vs ee pose ----
-                if wrist_cam is not None:
-                    _update_wrist_cam_pose()
-                    wrist_cam.update(dt=control_dt, force_recompute=True)
-                    cp = wrist_cam.data.pos_w[0]
-                    cq = wrist_cam.data.quat_w_world[0]
-                    ep = grip_center_pos(robot, left_id, right_id)[0]
-                    bp = box.data.root_pos_w[0]
-                    # cam forward direction (world convention quat: forward=+X)
-                    fwd = quat_apply(cq.unsqueeze(0),
-                                     torch.tensor([[1.0, 0.0, 0.0]], device=device, dtype=torch.float))[0]
-                    print(f"  [DBG wrist] cam_pos_w={cp.tolist()} cam_quat={cq.tolist()}")
-                    print(f"  [DBG wrist] ee_pos_w ={ep.tolist()} box_pos_w={bp.tolist()}")
-                    print(f"  [DBG wrist] cam→box vec={(bp - cp).tolist()}  cam_fwd={fwd.tolist()}")
             ee_pos_w = grip_center_pos(robot, left_id, right_id)
             ee_xy_env = ee_pos_w[:, :2] - scene.env_origins[:, :2]
 
-            if use_vision:
-                # xy 는 항상 천장 cam scan 결과 (정확). yaw 만 손목 cam (회전 detect 강점).
-                box_x_env_v, box_y_env_v = fallback_box_xy_env
-                est = wrist_cam_estimate_box()
-                if est is not None:
-                    _, _, box_yaw_v = est  # xy 는 버림, yaw 만 사용
-                else:
-                    box_yaw_v = fallback_box_yaw
-                # ---- DBG: 매 30 step 비교 ----
-                if step_i % 30 == 0:
-                    gt_xy = box.data.root_pos_w[0, :2] - scene.env_origins[0, :2]
-                    gt_yaw = quat_z_yaw(box.data.root_quat_w)[0].item()
-                    diff_x = (box_x_env_v - gt_xy[0].item()) * 1000
-                    diff_y = (box_y_env_v - gt_xy[1].item()) * 1000
-                    diff_yaw = math.degrees(
-                        wrap_to_pi(torch.tensor([box_yaw_v - gt_yaw])).item())
-                    src_tag = "wrist" if est is not None else "fallback"
-                    print(f"  [DBG yaw] step={step_i:3d} src={src_tag:8s} "
-                          f"obs=({box_x_env_v:+.3f},{box_y_env_v:+.3f},yaw={math.degrees(box_yaw_v):+7.1f}°) "
-                          f"gt=({gt_xy[0]:+.3f},{gt_xy[1]:+.3f},yaw={math.degrees(gt_yaw):+7.1f}°) "
-                          f"diff=({diff_x:+5.1f},{diff_y:+5.1f})mm dyaw={diff_yaw:+5.1f}°")
-            else:
-                box_pos_w = box.data.root_pos_w
-                box_xy_env_t = box_pos_w[:, :2] - scene.env_origins[:, :2]
-                box_x_env_v = box_xy_env_t[0, 0].item()
-                box_y_env_v = box_xy_env_t[0, 1].item()
-                box_yaw_v = quat_z_yaw(box.data.root_quat_w)[0].item()
+            # ---- DBG: 매 60 step gt 비교 (top cam est 는 고정값이라 1회면 충분) ----
+            if step_i == 0:
+                gt_xy = box.data.root_pos_w[0, :2] - scene.env_origins[0, :2]
+                gt_yaw = quat_z_yaw(box.data.root_quat_w)[0].item()
+                diff_x = (box_x_env_v - gt_xy[0].item()) * 1000
+                diff_y = (box_y_env_v - gt_xy[1].item()) * 1000
+                diff_yaw = math.degrees(
+                    wrap_to_pi(torch.tensor([box_yaw_v - gt_yaw])).item())
+                print(f"  [DBG box] top_cam est=({box_x_env_v:+.3f},{box_y_env_v:+.3f},"
+                      f"{math.degrees(box_yaw_v):+.1f}°) "
+                      f"gt=({gt_xy[0]:+.3f},{gt_xy[1]:+.3f},{math.degrees(gt_yaw):+.1f}°) "
+                      f"d=({diff_x:+5.1f},{diff_y:+5.1f})mm/{diff_yaw:+5.1f}°")
 
             obj_rel_x = box_x_env_v - ee_xy_env[0, 0].item()
             obj_rel_y = box_y_env_v - ee_xy_env[0, 1].item()
@@ -940,17 +1005,27 @@ def run_pipeline(sim, scene):
         report("2. RL grasp align")
         return ee_target_yaw, success
 
-    # ---- Stage 4: Insert RL inference (yaw-only) ----
-    def stage_rl_insert(max_steps: int, cell_xy_v, cell_yaw_v: float) -> bool:
-        """학습된 PPO 정책으로 cell yaw 정렬. ee_xy=cell_xy+offset / ee_z=TRANSPORT_Z 고정.
+    # ---- Stage 4: Insert RL inference (yaw-only, 천장 cam 만) ----
+    def stage_rl_insert(max_steps: int,
+                        top_cell_xy: tuple[float, float],
+                        top_cell_yaw: float) -> tuple[bool, float]:
+        """학습된 PPO 정책으로 cell yaw 정렬. xy 는 cell_xy + cell-rotated offset 고정.
 
-        Obs (3): yaw_err, yaw_vel, is_grasping
-        Action (1): Δyaw
+        cell_yaw 는 천장 cam scan 결과 (top_cell_yaw) 고정 사용.
+
+        Returns: (success, final_cell_yaw_used)
         """
         aligned_count = 0
         success = False
-        print(f"[stage] 4. RL insert align (PPO inference, yaw-only) | max_steps={max_steps}")
+        cell_yaw_v = top_cell_yaw   # 천장 cam scan 결과 그대로
+        print(f"[stage] 4. RL insert align (PPO, top_cam only) | max_steps={max_steps}")
         z_axis_t = torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)
+
+        # DBG: stage 시작 시 1회 gt 비교
+        gt_cell_yaw = float(quat_z_yaw(scene["wall_v_left"].data.root_quat_w)[0].item())
+        d_yaw = math.degrees(wrap_to_pi(torch.tensor([cell_yaw_v - gt_cell_yaw])).item())
+        print(f"  [DBG cell_yaw] top_cam est={math.degrees(cell_yaw_v):+7.1f}° "
+              f"gt={math.degrees(gt_cell_yaw):+7.1f}° dyaw={d_yaw:+5.1f}°")
 
         for step_i in range(max_steps):
             ee_quat_w = grip_center_quat(robot, left_id)
@@ -961,7 +1036,7 @@ def run_pipeline(sim, scene):
             ang_r = robot.data.body_ang_vel_w[0, right_id, 2].item()
             yaw_vel = 0.5 * (ang_l + ang_r)
 
-            is_grasping = 1.0  # chain 에서 박스 잡혀있다고 가정
+            is_grasping = 1.0
 
             obs_np = np.array([yaw_err, yaw_vel, is_grasping], dtype=np.float32)
             obs_norm = insert_normalize_obs(obs_np)
@@ -977,8 +1052,8 @@ def run_pipeline(sim, scene):
             dx_world = cos_y * INSERT_TARGET_X_OFFSET - sin_y * INSERT_TARGET_Y_OFFSET
             dy_world = sin_y * INSERT_TARGET_X_OFFSET + cos_y * INSERT_TARGET_Y_OFFSET
             target_pos_env = torch.tensor(
-                [cell_xy_v[0] + dx_world,
-                 cell_xy_v[1] + dy_world,
+                [top_cell_xy[0] + dx_world,
+                 top_cell_xy[1] + dy_world,
                  TRANSPORT_Z], device=device, dtype=torch.float)
 
             yaw_q = quat_from_angle_axis(
@@ -1000,7 +1075,7 @@ def run_pipeline(sim, scene):
         if not success:
             print(f"  [stage 4] timeout {max_steps} steps — final aligned_count={aligned_count}")
         report("4. RL insert align")
-        return success
+        return success, cell_yaw_v
 
     # ============= spawn helpers =============
     def random_box_spawn():
@@ -1064,7 +1139,16 @@ def run_pipeline(sim, scene):
     grasp_success_count = 0
     insert_success_count = 0  # 박스 cell 안에 위치 + z 가 PLACE_Z 근처
 
+    # ---- 벤치마크 데이터 (per-run) ----
+    import time as _time
+    benchmark_rows = []  # 각 run 의 metric dict
+    run_t_start_all = _time.time()
+
+    def _cell_world_yaw_from_walls(scene_obj):
+        return float(quat_z_yaw(scene_obj["wall_v_left"].data.root_quat_w)[0].item())
+
     for rep in range(n_repeat):
+        run_t_start = _time.time()
         print(f"\n========== run {rep+1}/{n_repeat} START ==========")
         robot.write_joint_state_to_sim(home_q, joint_vel)
         robot.set_joint_position_target(home_q)
@@ -1082,29 +1166,23 @@ def run_pipeline(sim, scene):
         # ---- 천장 cam scan ----
         top_est = top_cam_scan(rep_idx=rep + 1)
 
-        # ---- waypoint / cell yaw — vision 결과 또는 GT ----
-        if args_cli.use_vision:
-            box_xy_used = top_est["box_xy_env"] if top_est["box_xy_env"] is not None else (bx, by)
-            box_yaw_used_init = top_est["box_yaw"] if top_est["box_yaw"] is not None else byaw
-            cell_xy_used = top_est["cell_xy_env"] if top_est["cell_xy_env"] is not None else (cx, cy)
-            cell_yaw_used = top_est["cell_yaw"] if top_est["cell_yaw"] is not None else cyaw
-        else:
-            box_xy_used = (bx, by)
-            box_yaw_used_init = byaw
-            cell_xy_used = (cx, cy)
-            cell_yaw_used = cyaw
+        # ---- waypoint / cell yaw — vision 만 사용 (GT fallback X). 검출 실패 시 run skip. ----
+        if (top_est["box_xy_env"] is None or top_est["box_yaw"] is None
+                or top_est["cell_xy_env"] is None or top_est["cell_yaw"] is None):
+            print(f"  [run {rep+1}] ❌ YOLO 검출 실패 (box={top_est['box_xy_env']}, "
+                  f"cell={top_est['cell_xy_env']}). run skip.")
+            continue
+
+        box_xy_used = top_est["box_xy_env"]
+        box_yaw_used_init = top_est["box_yaw"]
+        cell_xy_used = top_est["cell_xy_env"]
+        cell_yaw_used = top_est["cell_yaw"]
 
         bx_wp, by_wp = box_xy_used
         cx_wp, cy_wp = cell_xy_used
 
-        # vision 켰으면 cam 추정 좌표로 직행 (random offset X) — 추정 자체가 noise 역할
-        # ground truth 면 학습 분포 흉내내려고 random offset 추가
-        if args_cli.use_vision:
-            off_grasp = (0.0, 0.0)
-        else:
-            off_grasp = random_ee_offset()
-        print(f"[run {rep+1}] ee offsets: grasp dxy=({off_grasp[0]*100:+.2f},{off_grasp[1]*100:+.2f})cm "
-              f"(vision={'ON' if args_cli.use_vision else 'OFF'})")
+        # ee offset 0 — vision 좌표로 직행
+        off_grasp = (0.0, 0.0)
 
         pre_grasp_offset = torch.tensor(
             [bx_wp + off_grasp[0], by_wp + off_grasp[1], PRE_GRASP_Z],
@@ -1127,26 +1205,48 @@ def run_pipeline(sim, scene):
                    start_quat_w=home_grip_quat_w.unsqueeze(0),
                    end_quat_w=base_ee_quat)
 
-        # ---- 2. Grasp RL (손목 cam obs) ----
-        final_yaw, grasp_success = stage_rl_grasp(
-            args_cli.rl_max_steps,
-            use_vision=args_cli.use_vision,
-            rep_idx=rep + 1,
-            fallback_box_xy_env=box_xy_used,
-            fallback_box_yaw=box_yaw_used_init,
-        )
+        # ---- 2. Grasp 정렬 ----
+        if args_cli.no_rl:
+            # no_rl: 천장 cam scan 결과 그대로 사용 (손목 cam X)
+            refined_box_x, refined_box_y = box_xy_used
+            refined_box_yaw = box_yaw_used_init
+            print(f"[stage] 2. no_rl: top_cam xy=({refined_box_x:+.3f},{refined_box_y:+.3f}) "
+                  f"yaw={math.degrees(refined_box_yaw):+.1f}°")
+            yaw_q_final = quat_from_angle_axis(
+                torch.tensor([refined_box_yaw], device=device, dtype=torch.float),
+                torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float))
+            ee_quat_after_align = quat_mul(yaw_q_final, base_ee_quat)
+            # 짧은 motion 으로 ee yaw 정렬 (xy/z 유지)
+            stage_move(pre_grasp_offset, pre_grasp_offset, 0.8, GRIPPER_OPEN,
+                       "2. (no_rl) yaw align",
+                       start_quat_w=base_ee_quat, end_quat_w=ee_quat_after_align)
+            final_yaw = refined_box_yaw
+            grasp_success = True
+        else:
+            final_yaw, grasp_success = stage_rl_grasp(
+                args_cli.rl_max_steps,
+                top_box_xy_env=box_xy_used,
+                top_box_yaw=box_yaw_used_init,
+                rep_idx=rep + 1,
+            )
+            yaw_q_final = quat_from_angle_axis(
+                torch.tensor([final_yaw], device=device, dtype=torch.float),
+                torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float))
+            ee_quat_after_align = quat_mul(yaw_q_final, base_ee_quat)
         if grasp_success:
             grasp_success_count += 1
 
-        yaw_q_final = quat_from_angle_axis(
-            torch.tensor([final_yaw], device=device, dtype=torch.float),
-            torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float))
-        ee_quat_after_align = quat_mul(yaw_q_final, base_ee_quat)
-
-        # ---- 3a. Descend ----
+        # ---- 3a. Descend — Stage 2 끝 ee xy 그대로 사용 (RL/wrist 정렬 결과 유지) ----
         cur_ee = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
         descend_start = torch.tensor(
             [cur_ee[0].item(), cur_ee[1].item(), PRE_GRASP_Z],
+            device=device, dtype=torch.float)
+        # grasp_pos / lift_pos 를 stage 2 끝 ee xy 로 재정의 (top cam xy 무시)
+        grasp_pos = torch.tensor(
+            [cur_ee[0].item(), cur_ee[1].item(), GRASP_Z],
+            device=device, dtype=torch.float)
+        lift_pos = torch.tensor(
+            [cur_ee[0].item(), cur_ee[1].item(), LIFT_Z],
             device=device, dtype=torch.float)
         stage_move(descend_start, grasp_pos,
                    STAGE_DURATION_S["descend"], GRIPPER_OPEN,
@@ -1170,10 +1270,43 @@ def run_pipeline(sim, scene):
                    start_quat_w=ee_quat_after_align,
                    end_quat_w=base_ee_quat)
 
-        # ---- 4. Insert RL align (yaw-only) ----
-        insert_success = stage_rl_insert(args_cli.rl_max_steps, (cx_wp, cy_wp), cell_yaw_used)
+        # ---- 4. Insert 정렬 (yaw-only) ----
+        if args_cli.no_rl:
+            # no_rl: 천장 cam scan cell_yaw 그대로 사용 (손목 cam X)
+            refined_cell_yaw = cell_yaw_used
+            print(f"[stage] 4. no_rl: top_cam cell_yaw="
+                  f"{math.degrees(refined_cell_yaw):+.1f}°")
+            ref_cell_yaw_q = quat_from_angle_axis(
+                torch.tensor([refined_cell_yaw], device=device, dtype=torch.float),
+                torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float))
+            cell_ee_quat = quat_mul(ref_cell_yaw_q, base_ee_quat)
+            # cell-local INSERT_TARGET offset 적용 (RL 모드와 일관)
+            cos_y = math.cos(refined_cell_yaw)
+            sin_y = math.sin(refined_cell_yaw)
+            dx_world = cos_y * INSERT_TARGET_X_OFFSET - sin_y * INSERT_TARGET_Y_OFFSET
+            dy_world = sin_y * INSERT_TARGET_X_OFFSET + cos_y * INSERT_TARGET_Y_OFFSET
+            # 시작 = 현재 ee xy (transport 끝, offset 없음), 끝 = cell xy + offset
+            cur_ee_t = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
+            start_pos = torch.tensor(
+                [cur_ee_t[0].item(), cur_ee_t[1].item(), TRANSPORT_Z],
+                device=device, dtype=torch.float)
+            end_pos = torch.tensor(
+                [cx_wp + dx_world, cy_wp + dy_world, TRANSPORT_Z],
+                device=device, dtype=torch.float)
+            stage_move(start_pos, end_pos, 0.8, gripper_close,
+                       "4. (no_rl) xy_offset + yaw align",
+                       start_quat_w=base_ee_quat, end_quat_w=cell_ee_quat)
+            insert_success = True
+        else:
+            insert_success, refined_cell_yaw = stage_rl_insert(
+                args_cli.rl_max_steps, (cx_wp, cy_wp), cell_yaw_used)
+            # RL 정렬 끝의 cell_yaw 로 quat 재계산 (이후 stage 5a/b 에 사용)
+            ref_cell_yaw_q = quat_from_angle_axis(
+                torch.tensor([refined_cell_yaw], device=device, dtype=torch.float),
+                torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float))
+            cell_ee_quat = quat_mul(ref_cell_yaw_q, base_ee_quat)
 
-        # ---- 5a. Insert descend (ee yaw 는 RL 정렬 끝점 cell_ee_quat) ----
+        # ---- 5a. Insert descend (ee yaw 는 RL/motion 정렬 끝점 cell_ee_quat) ----
         cur_ee_2 = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
         descend_start_2 = torch.tensor(
             [cur_ee_2[0].item(), cur_ee_2[1].item(), TRANSPORT_Z],
@@ -1210,11 +1343,92 @@ def run_pipeline(sim, scene):
         if insert_ok:
             insert_success_count += 1
 
+        # ---- 벤치마크 metric 수집 ----
+        run_t_elapsed = _time.time() - run_t_start
+        final_box_yaw = float(quat_z_yaw(box.data.root_quat_w)[0].item())
+        cell_yaw_gt = _cell_world_yaw_from_walls(scene)
+        yaw_err = float(wrap_to_pi(
+            torch.tensor([final_box_yaw - cell_yaw_gt])).item())
+        # vision 추정 오차 (top cam)
+        box_xy_err = float('nan')
+        box_yaw_err = float('nan')
+        cell_xy_err = float('nan')
+        cell_yaw_err = float('nan')
+        if top_est["box_xy_env"] is not None:
+            box_xy_err = math.sqrt((top_est["box_xy_env"][0] - bx) ** 2
+                                    + (top_est["box_xy_env"][1] - by) ** 2)
+        if top_est["box_yaw"] is not None:
+            box_yaw_err = float(wrap_to_pi(
+                torch.tensor([top_est["box_yaw"] - byaw])).item())
+        if top_est["cell_xy_env"] is not None:
+            cell_xy_err = math.sqrt((top_est["cell_xy_env"][0] - cx) ** 2
+                                     + (top_est["cell_xy_env"][1] - cy) ** 2)
+        if top_est["cell_yaw"] is not None:
+            cell_yaw_err = float(wrap_to_pi(
+                torch.tensor([top_est["cell_yaw"] - cyaw])).item())
+        benchmark_rows.append({
+            "run": rep + 1,
+            "grasp_success": int(bool(grasp_success)),
+            "insert_success": int(bool(insert_ok)),
+            "final_box_x": float(obj_pos_w[0]),
+            "final_box_y": float(obj_pos_w[1]),
+            "final_box_z": float(obj_pos_w[2]),
+            "final_xy_dist_cm": cell_xy_dist * 100.0,
+            "final_yaw_err_deg": math.degrees(yaw_err),
+            "box_gt_x": bx, "box_gt_y": by, "box_gt_yaw_deg": math.degrees(byaw),
+            "cell_gt_x": cx, "cell_gt_y": cy, "cell_gt_yaw_deg": math.degrees(cyaw),
+            "vision_box_xy_err_mm": box_xy_err * 1000.0 if not math.isnan(box_xy_err) else float('nan'),
+            "vision_box_yaw_err_deg": math.degrees(box_yaw_err) if not math.isnan(box_yaw_err) else float('nan'),
+            "vision_cell_xy_err_mm": cell_xy_err * 1000.0 if not math.isnan(cell_xy_err) else float('nan'),
+            "vision_cell_yaw_err_deg": math.degrees(cell_yaw_err) if not math.isnan(cell_yaw_err) else float('nan'),
+            "elapsed_s": run_t_elapsed,
+        })
+
         print(f"\n[run {rep+1}] FINAL box (env-rel): "
               f"({obj_pos_w[0]:+.3f},{obj_pos_w[1]:+.3f},{obj_pos_w[2]:+.3f})")
-        print(f"[run {rep+1}] FINAL box xy-dist to cell: {cell_xy_dist*100:.2f} cm")
+        print(f"[run {rep+1}] FINAL box xy-dist to cell: {cell_xy_dist*100:.2f} cm "
+              f"yaw_err: {math.degrees(yaw_err):+.1f}° elapsed: {run_t_elapsed:.1f}s")
         print(f"[run {rep+1}] grasp success: {grasp_success}, insert success: {insert_ok}")
         print(f"========== run {rep+1}/{n_repeat} DONE ==========\n")
+
+    # ============= 종합 통계 =============
+    total_elapsed = _time.time() - run_t_start_all
+    n_total = len(benchmark_rows)
+    n_grasp = sum(r["grasp_success"] for r in benchmark_rows)
+    n_insert = sum(r["insert_success"] for r in benchmark_rows)
+    print("\n" + "=" * 70)
+    print(f"[BENCHMARK] mode={'no_rl' if args_cli.no_rl else 'rl'} total={n_total} "
+          f"elapsed_total={total_elapsed/60:.1f}min")
+    print(f"  grasp_success  : {n_grasp}/{n_total} ({n_grasp/n_total*100:.1f}%)")
+    print(f"  insert_success : {n_insert}/{n_total} ({n_insert/n_total*100:.1f}%)")
+
+    def _stats(vals, name):
+        import statistics as _st
+        vals = [v for v in vals if not (isinstance(v, float) and math.isnan(v))]
+        if not vals: return f"  {name}: (no data)"
+        return (f"  {name}: mean={_st.mean(vals):+.3f} "
+                f"median={_st.median(vals):+.3f} "
+                f"std={_st.pstdev(vals):.3f} "
+                f"min={min(vals):+.3f} max={max(vals):+.3f}")
+    print(_stats([r["final_xy_dist_cm"] for r in benchmark_rows], "final_xy_dist_cm"))
+    print(_stats([r["final_yaw_err_deg"] for r in benchmark_rows], "final_yaw_err_deg"))
+    print(_stats([r["elapsed_s"] for r in benchmark_rows], "elapsed_s"))
+    print(_stats([r["vision_box_xy_err_mm"] for r in benchmark_rows], "vision_box_xy_err_mm"))
+    print(_stats([r["vision_box_yaw_err_deg"] for r in benchmark_rows], "vision_box_yaw_err_deg"))
+    print(_stats([r["vision_cell_xy_err_mm"] for r in benchmark_rows], "vision_cell_xy_err_mm"))
+    print(_stats([r["vision_cell_yaw_err_deg"] for r in benchmark_rows], "vision_cell_yaw_err_deg"))
+    print("=" * 70)
+
+    # CSV 저장
+    if args_cli.csv_out:
+        import csv as _csv
+        os.makedirs(os.path.dirname(args_cli.csv_out) or ".", exist_ok=True)
+        if benchmark_rows:
+            with open(args_cli.csv_out, "w", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=list(benchmark_rows[0].keys()))
+                w.writeheader()
+                w.writerows(benchmark_rows)
+            print(f"[BENCHMARK] CSV saved → {args_cli.csv_out}")
 
     print(f"\n[chain+rl+cam2] grasp  success rate: {grasp_success_count}/{n_repeat}")
     print(f"[chain+rl+cam2] insert success rate: {insert_success_count}/{n_repeat}")

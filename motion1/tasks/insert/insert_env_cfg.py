@@ -125,19 +125,24 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # =========================
     # 8. Action scale
     # =========================
-    action_scale_xy: float = 0.005    # 5mm/step (overshoot 감소, fine 정렬용)
+    action_scale_xy: float = 0.005    # v21: 2mm → 5mm 원복 (v20 의 2mm 너무 작음)
     action_scale_yaw: float = 0.05    # ~2.86°/step
 
     # =========================
     # 9. Reward 가중치
     # all-positive (drop 은 termination 으로 자연 페널티)
     # =========================
-    reward_xy_align_gain: float = 80.0        # exp(-gain * xy_dist²) — 멀리 가도 작은 신호 (exploration)
-    reward_xy_align_gain_close: float = 200.0  # exp(-gain * xy_dist²) — 가까이 sharp (정밀 정렬)
-    reward_yaw_align_gain: float = 5.0    # exp(-gain * yaw_err²)
-    reward_smooth_w: float = 0.01         # -w * (vel² 합)
+    reward_xy_align_gain: float = 200.0        # v22: 40 → 200 (landscape sharpen, 5cm 에서 0.9→0.61)
+    reward_xy_align_gain_close: float = 500.0  # v22: 100 → 500 (1cm 안 sharp, 0.99→0.95)
+    reward_yaw_align_gain: float = 15.0    # v18: 5 → 15 (sharper yaw)
+    reward_smooth_w: float = 0.0          # v20: ee_vel 페널티 제거 (효과 없음)
     reward_success_bonus: float = 50.0    # aligned 매 step (정렬 유지 + holding)
     reward_success_lump: float = 5000.0   # success terminate 시 한 번에
+    # v19: 거리 페널티 — 1cm 초과 거리에 비례 페널티 (1cm 안 유도)
+    reward_far_penalty_w: float = 20.0    # -w × max(0, xy_dist - 0.01)
+    reward_far_threshold: float = 0.01    # 1cm 이상 떨어지면 페널티 시작
+    # v20: action L2 penalty — fine motor control 학습 (정책이 작은 action 출력)
+    reward_action_penalty_w: float = 0.1  # v21: 0.5 → 0.1 (약하게, cell 도달 능력 회복)
 
     # is_grasping 판정 (finger ↔ box 거리 + box z 임계)
     grasping_dist_threshold: float = 0.07   # finger center ↔ box 거리 7cm 이내
@@ -146,10 +151,10 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # =========================
     # 10. 종료 조건
     # =========================
-    align_xy_threshold: float = 0.010     # 10mm (이전 5mm 빡셈)
-    align_yaw_threshold: float = 0.087    # ~5° (이전 2.86° 빡셈)
-    success_hold_steps: int = 15          # 0.25초 (이전 30=0.5초)
-    fail_xy_threshold: float = 0.30       # ee 가 셀에서 30cm 이상 멀어지면 실패
+    align_xy_threshold: float = 0.005     # v18: 10mm → 5mm (정밀)
+    align_yaw_threshold: float = 0.052    # v18: 5° → 3° (정밀)
+    success_hold_steps: int = 30          # v18: 15 → 30 (0.25s → 0.5s)
+    fail_xy_threshold: float = 0.20       # v22: 0.10 → 0.20 임시 확장 (학습 초반 발산 허용, terminate 너무 잦아 학습 못 함)
 
     # =========================
     # 11. 이름 매핑 (motion-only 와 동일)

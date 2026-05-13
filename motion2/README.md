@@ -17,6 +17,7 @@ motion2/SIM_TO_REAL_CHECKLIST.md
 현재 승인된 real-robot 범위:
 
 - tiny joint/gripper smoke sequence
+- `run_capstone_mvp_pipeline.py`의 전체 캡스톤 파이프라인 요약
 - `run_pick_place_mvp.py`의 dry-run chain 출력
 - `run_pick_place_mvp.py --demo-safe` 발표용 안전 흐름 출력
 - MoveIt plan-only waypoint 검증

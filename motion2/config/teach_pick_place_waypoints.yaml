@@ -1,0 +1,51 @@
+# Teach/replay waypoints for the OMY-F3M pick-place MVP.
+#
+# Record waypoints with:
+#   python3 motion2/scripts/record_teach_waypoint.py --name pre_grasp
+#
+# Replay must be dry-run first. Real execution is handled by
+# run_teach_pick_place.py and requires an explicit confirmation token.
+
+verified: false
+bringup: omy_f3m.launch.py
+mode: teach_waypoint_replay
+
+controller:
+  arm_action: /arm_controller/follow_joint_trajectory
+  gripper_action: /gripper_controller/gripper_cmd
+
+safety:
+  max_joint_delta_per_step: 0.35
+  min_gripper_position: 0.0
+  max_gripper_position: 1.12
+  default_arm_duration: 5.0
+  default_gripper_max_effort: 0.0
+  execute_requires_confirm: true
+  forbidden_execution:
+    - MoveIt pose execute
+    - Cartesian execute
+
+arm_joints:
+  - joint1
+  - joint2
+  - joint3
+  - joint4
+  - joint5
+  - joint6
+
+gripper_joint: rh_r1_joint
+
+gripper_targets:
+  close_gripper: 0.60
+  open_gripper: 0.00
+
+sequence:
+  - pre_grasp
+  - grasp
+  - close_gripper
+  - lift
+  - place
+  - open_gripper
+  - retract
+
+waypoints: {}

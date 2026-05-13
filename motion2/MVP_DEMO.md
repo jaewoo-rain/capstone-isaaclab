@@ -65,6 +65,12 @@ Expected actions:
 
 ## Demo 1: full MVP chain dry-run
 
+Capstone-level pipeline summary:
+
+```bash
+python3 motion2/scripts/run_capstone_mvp_pipeline.py
+```
+
 Fast safe presentation mode:
 
 ```bash

@@ -9,6 +9,7 @@ import argparse
 import datetime as _datetime
 import pathlib
 import re
+import time
 from typing import Any
 
 import yaml
@@ -17,6 +18,8 @@ import yaml
 ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
 GRIPPER_JOINT = "rh_r1_joint"
 DEFAULT_CONFIG = "motion2/config/teach_pick_place_waypoints.yaml"
+DEFAULT_BASE_FRAME = "link0"
+DEFAULT_EE_FRAME = "link6"
 
 
 def _repo_root() -> pathlib.Path:
@@ -101,6 +104,41 @@ def _joint_state_once(node, rclpy, timeout_s: float) -> dict[str, float]:
     raise RuntimeError("Timed out waiting for /joint_states")
 
 
+def _lookup_current_pose(node, rclpy, frame_id: str, link_name: str, timeout_s: float) -> dict[str, Any]:
+    from tf2_ros import Buffer, TransformListener
+
+    tf_buffer = Buffer()
+    TransformListener(tf_buffer, node)
+    deadline = time.monotonic() + timeout_s
+    last_error = None
+    while time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        try:
+            tf = tf_buffer.lookup_transform(frame_id, link_name, rclpy.time.Time())
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            return {
+                "frame_id": frame_id,
+                "link_name": link_name,
+                "position": {
+                    "x": float(t.x),
+                    "y": float(t.y),
+                    "z": float(t.z),
+                },
+                "quat_wxyz": {
+                    "w": float(q.w),
+                    "x": float(q.x),
+                    "y": float(q.y),
+                    "z": float(q.z),
+                },
+            }
+        except Exception as exc:  # tf2_ros exception classes vary by distro.
+            last_error = exc
+    raise RuntimeError(
+        f"Timed out waiting for TF {frame_id} -> {link_name}. "
+        f"Last error: {last_error}") from last_error
+
+
 def _validate_name(name: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", name):
         raise ValueError(
@@ -108,17 +146,25 @@ def _validate_name(name: str) -> None:
             "and must not start with hyphen")
 
 
-def _record_from_joint_state(joints: dict[str, float], arm_joints: list[str], gripper_joint: str) -> dict[str, Any]:
+def _record_from_joint_state(
+    joints: dict[str, float],
+    arm_joints: list[str],
+    gripper_joint: str,
+    ee_pose: dict[str, Any] | None,
+) -> dict[str, Any]:
     required = list(arm_joints) + [gripper_joint]
     missing = [name for name in required if name not in joints]
     if missing:
         raise RuntimeError(f"Missing required joints in /joint_states: {missing}")
 
-    return {
+    record = {
         "arm": {name: float(joints[name]) for name in arm_joints},
         "gripper": {gripper_joint: float(joints[gripper_joint])},
         "recorded_at_utc": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
     }
+    if ee_pose is not None:
+        record["ee_pose"] = ee_pose
+    return record
 
 
 def _write_config(path: pathlib.Path, data: dict[str, Any]) -> None:
@@ -136,6 +182,9 @@ def main() -> int:
     parser.add_argument("--name", required=True, help="Waypoint name, e.g. pre_grasp")
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--base-frame", default=DEFAULT_BASE_FRAME)
+    parser.add_argument("--ee-frame", default=DEFAULT_EE_FRAME)
+    parser.add_argument("--skip-ee-pose", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -159,11 +208,16 @@ def main() -> int:
     node = Node("motion2_record_teach_waypoint")
     try:
         joints = _joint_state_once(node, rclpy, args.timeout)
+        ee_pose = None
+        if not args.skip_ee_pose:
+            ee_pose = _lookup_current_pose(
+                node, rclpy, args.base_frame, args.ee_frame, args.timeout)
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
-    waypoints[args.name] = _record_from_joint_state(joints, arm_joints, gripper_joint)
+    waypoints[args.name] = _record_from_joint_state(
+        joints, arm_joints, gripper_joint, ee_pose)
     _write_config(config_path, data)
 
     arm_text = ", ".join(f"{name}={waypoints[args.name]['arm'][name]:.6f}" for name in arm_joints)
@@ -172,6 +226,14 @@ def main() -> int:
     print(f"[teach-record] config: {config_path}")
     print(f"[teach-record] arm: {arm_text}")
     print(f"[teach-record] gripper: {gripper_joint}={gripper_value:.6f}")
+    if ee_pose is not None:
+        pos = ee_pose["position"]
+        quat = ee_pose["quat_wxyz"]
+        print(
+            "[teach-record] ee_pose: "
+            f"{ee_pose['frame_id']} -> {ee_pose['link_name']} "
+            f"pos=[{pos['x']:.6f}, {pos['y']:.6f}, {pos['z']:.6f}] "
+            f"quat_wxyz=[{quat['w']:.6f}, {quat['x']:.6f}, {quat['y']:.6f}, {quat['z']:.6f}]")
     print("[teach-record] command_sent=false")
     return 0
 

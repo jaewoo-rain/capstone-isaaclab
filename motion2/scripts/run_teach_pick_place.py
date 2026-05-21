@@ -39,6 +39,7 @@ class ArmStep:
     name: str
     positions: list[float]
     max_delta_from_previous: float
+    ee_pose: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,15 @@ def _build_steps(
             raise ValueError(
                 f"{name}: max joint delta {max_delta:.6f} rad at {max_joint} "
                 f"exceeds limit {max_joint_delta:.6f} rad")
-        steps.append(ArmStep(name=name, positions=positions, max_delta_from_previous=max_delta))
+        ee_pose = waypoint.get("ee_pose")
+        if ee_pose is not None and not isinstance(ee_pose, dict):
+            raise ValueError(f"waypoints.{name}.ee_pose must be a mapping when present")
+        steps.append(ArmStep(
+            name=name,
+            positions=positions,
+            max_delta_from_previous=max_delta,
+            ee_pose=ee_pose,
+        ))
         previous_arm = positions
     return steps
 
@@ -209,6 +218,19 @@ def _print_steps(
             print(
                 f"[teach-replay] step {idx:02d} arm {step.name}: "
                 f"max_delta={step.max_delta_from_previous:.6f} {values}")
+            if step.ee_pose:
+                pos = step.ee_pose.get("position", {})
+                quat = step.ee_pose.get("quat_wxyz", {})
+                print(
+                    f"[teach-replay] step {idx:02d} ee_pose {step.name}: "
+                    f"{step.ee_pose.get('frame_id')} -> {step.ee_pose.get('link_name')} "
+                    f"pos=[{float(pos.get('x', 0.0)):.6f}, "
+                    f"{float(pos.get('y', 0.0)):.6f}, "
+                    f"{float(pos.get('z', 0.0)):.6f}] "
+                    f"quat_wxyz=[{float(quat.get('w', 0.0)):.6f}, "
+                    f"{float(quat.get('x', 0.0)):.6f}, "
+                    f"{float(quat.get('y', 0.0)):.6f}, "
+                    f"{float(quat.get('z', 0.0)):.6f}]")
         else:
             print(
                 f"[teach-replay] step {idx:02d} gripper {step.name}: "
@@ -254,6 +276,12 @@ def _send_gripper_goal(node, rclpy, client, step: GripperStep, max_effort: float
     return 0 if result.reached_goal else 2
 
 
+def _confirm_step(step_name: str) -> None:
+    typed = input(f"[teach-replay] type {step_name} to execute this step: ").strip()
+    if typed != step_name:
+        raise RuntimeError(f"Refusing to execute step {step_name!r}; typed {typed!r}")
+
+
 def main() -> int:
     import rclpy
     from rclpy.action import ActionClient
@@ -273,6 +301,11 @@ def main() -> int:
     parser.add_argument("--max-gripper-position", type=float, default=None)
     parser.add_argument("--gripper-max-effort", type=float, default=None)
     parser.add_argument("--joint-state-timeout", type=float, default=5.0)
+    parser.add_argument("--plan-only", action="store_true", help="Alias for default dry-run validation.")
+    parser.add_argument(
+        "--no-step-prompts",
+        action="store_true",
+        help="Do not ask for per-step typed confirmation after --confirm. Not recommended.")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm", default="")
     args = parser.parse_args()
@@ -352,6 +385,8 @@ def main() -> int:
 
         for idx, step in enumerate(steps, start=1):
             print(f"[teach-replay] executing step {idx}/{len(steps)}: {step.name}")
+            if not args.no_step_prompts:
+                _confirm_step(step.name)
             if isinstance(step, ArmStep):
                 rc = _send_arm_goal(node, rclpy, arm_client, arm_joints, step, arm_duration)
             else:

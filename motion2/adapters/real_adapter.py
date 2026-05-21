@@ -51,6 +51,7 @@ ChainStateMachine 는 변경 X — 이 파일만 채우면 sim 검증된 흐름 
 from __future__ import annotations
 
 import math
+import time
 import numpy as np
 
 from .base_adapter import BaseAdapter, CamData, EePose, BoxGtPose
@@ -64,16 +65,69 @@ class RealAdapter(BaseAdapter):
     """
 
     def __init__(self, control_dt: float = 1.0 / 60.0,
-                 home_joint_pos: dict | None = None):
+                 home_joint_pos: dict | None = None,
+                 *,
+                 base_frame: str = "link0",
+                 ee_frame: str = "end_effector_link",
+                 move_group_action: str = "/move_action",
+                 group_name: str = "arm",
+                 node_name: str = "motion2_real_adapter"):
         self._control_dt = control_dt
-        # === 친구가 추가할 init ===
-        #   - rs.pipeline 시작 (천장 + 손목 cam)
-        #   - rospy.init_node() / ros2 init
-        #   - OMY joint state subscriber
-        #   - OMY IK / motion service client
-        #   - gripper publisher
-        raise NotImplementedError(
-            "RealAdapter 구현 필요. base_adapter.py 의 메서드 7개 구현 후 NotImplementedError 제거.")
+        self.base_frame = base_frame
+        self.ee_frame = ee_frame
+        self.move_group_action = move_group_action
+        self.group_name = group_name
+        self.home_joint_pos = home_joint_pos or {
+            "joint1": 0.0,
+            "joint2": -1.55,
+            "joint3": 2.66,
+            "joint4": -1.1,
+            "joint5": 1.6,
+            "joint6": 0.0,
+        }
+        self._last_ee_pose: EePose | None = None
+        self._last_ee_stamp_ns: int | None = None
+        self._home_pose: tuple[np.ndarray, np.ndarray] | None = None
+
+        # Lazy ROS imports keep the module importable on non-robot machines.
+        import rclpy
+        from rclpy.node import Node
+        from tf2_ros import Buffer, TransformListener
+
+        if not rclpy.ok():
+            rclpy.init(args=None)
+
+        self._rclpy = rclpy
+        self.node = Node(node_name)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self.node)
+        self.node.get_logger().info(
+            "RealAdapter ready for TF/MoveIt plan checks. Camera capture is not enabled yet.")
+
+    @staticmethod
+    def _xyzw_to_wxyz(q_xyzw) -> np.ndarray:
+        return np.array([q_xyzw.w, q_xyzw.x, q_xyzw.y, q_xyzw.z], dtype=np.float32)
+
+    @staticmethod
+    def _vec3_to_np(v) -> np.ndarray:
+        return np.array([v.x, v.y, v.z], dtype=np.float32)
+
+    def _spin_some(self, timeout_sec: float = 0.0) -> None:
+        self._rclpy.spin_once(self.node, timeout_sec=timeout_sec)
+
+    def _lookup_transform(self, source_frame: str, timeout_s: float = 5.0):
+        deadline = time.monotonic() + timeout_s
+        last_error = None
+        while time.monotonic() < deadline:
+            self._spin_some(timeout_sec=0.05)
+            try:
+                return self.tf_buffer.lookup_transform(
+                    self.base_frame, source_frame, self._rclpy.time.Time())
+            except Exception as exc:  # tf2_ros exception classes vary by distro.
+                last_error = exc
+        raise RuntimeError(
+            f"Timed out waiting for TF {self.base_frame} -> {source_frame}. "
+            f"Last error: {last_error}") from last_error
 
     # ===== 필수 구현 =====
     def get_top_cam(self) -> CamData:
@@ -88,7 +142,9 @@ class RealAdapter(BaseAdapter):
              - pos_w: (3,) world position
              - quat_w_world: (4,) wxyz, world convention (forward=+X, up=+Z)
         """
-        raise NotImplementedError("get_top_cam() 구현 필요")
+        raise NotImplementedError(
+            "Top camera capture is intentionally not implemented yet. "
+            "Install/calibrate the D435 before enabling camera-based real runs.")
 
     def get_wrist_cam(self) -> CamData:
         """RealSense D405 (손목, link6 부착) RGB + depth + intrinsic + extrinsic.
@@ -98,7 +154,9 @@ class RealAdapter(BaseAdapter):
           cam_pos_w   = link6_pose_w.translation + link6_rotation @ (0.0, -0.1, 0.084)
           cam_quat_w  = link6_quat * (0, 0, 0.7071, -0.7071)  # ROS convention
         """
-        raise NotImplementedError("get_wrist_cam() 구현 필요")
+        raise NotImplementedError(
+            "Wrist camera capture is intentionally not implemented yet. "
+            "Install/calibrate the wrist camera before enabling camera-based real runs.")
 
     def get_ee_pose(self) -> EePose:
         """현재 ee (gripper finger center) world pose + velocity.
@@ -108,7 +166,21 @@ class RealAdapter(BaseAdapter):
         - lin_vel: ee 의 world linear velocity. joint vel + jacobian 으로 계산
         - ang_vel_z: ee 의 world z-axis angular velocity
         """
-        raise NotImplementedError("get_ee_pose() 구현 필요")
+        tf = self._lookup_transform(self.ee_frame)
+        pos = self._vec3_to_np(tf.transform.translation)
+        quat = self._xyzw_to_wxyz(tf.transform.rotation)
+
+        stamp_ns = tf.header.stamp.sec * 1_000_000_000 + tf.header.stamp.nanosec
+        lin_vel = np.zeros(3, dtype=np.float32)
+        if self._last_ee_pose is not None and self._last_ee_stamp_ns is not None:
+            dt = (stamp_ns - self._last_ee_stamp_ns) / 1_000_000_000.0
+            if dt > 1e-6:
+                lin_vel = ((pos - self._last_ee_pose.pos_w) / dt).astype(np.float32)
+
+        pose = EePose(pos_w=pos, quat_w=quat, lin_vel=lin_vel, ang_vel_z=0.0)
+        self._last_ee_pose = pose
+        self._last_ee_stamp_ns = stamp_ns
+        return pose
 
     def set_ee_target(self, target_pos: np.ndarray, target_quat: np.ndarray,
                       gripper_value: float) -> None:
@@ -125,7 +197,10 @@ class RealAdapter(BaseAdapter):
           3. gripper publish
         주의: blocking 아님. step() 가 실제로 control loop 진행.
         """
-        raise NotImplementedError("set_ee_target() 구현 필요")
+        self.node.get_logger().warning(
+            "RealAdapter.set_ee_target() is disabled for MVP safety. "
+            "Use motion2/scripts/run_manual_pick_place_real.py for guarded MoveIt "
+            "plan-only checks and explicit confirmed execution.")
 
     def step(self, n: int = 1) -> None:
         """real 의 control loop n step 진행 (각 step = control_dt).
@@ -134,7 +209,8 @@ class RealAdapter(BaseAdapter):
           - ROS 면 rospy.sleep(control_dt) 또는 rate.sleep()
           - rate = 1 / control_dt (보통 60 Hz)
         """
-        raise NotImplementedError("step() 구현 필요")
+        for _ in range(max(0, int(n))):
+            self._spin_some(timeout_sec=self._control_dt)
 
     def reset_to_home(self) -> None:
         """robot 을 home joint pose 로 이동 (blocking until complete).
@@ -143,7 +219,9 @@ class RealAdapter(BaseAdapter):
             joint1=0.0, joint2=-1.55, joint3=2.66, joint4=-1.1, joint5=1.6, joint6=0.0
             (gripper 4 joints 는 0 = open)
         """
-        raise NotImplementedError("reset_to_home() 구현 필요")
+        self.node.get_logger().warning(
+            "reset_to_home() is not implemented for real execution yet. "
+            "Use taught/guarded scripts with explicit confirmation.")
 
     def get_base_ee_quat(self) -> np.ndarray:
         """ee 가 정 아래 향하는 base orientation (sim 과 동일)."""
@@ -155,7 +233,14 @@ class RealAdapter(BaseAdapter):
         reset_to_home() 호출 후 get_ee_pose() 결과를 캐싱해서 반환해도 됨.
         또는 sim 에서 측정된 값 hardcode: pos=(0.136, -0.108, 0.388), quat=(0.7071, 0, 0.7071, 0)
         """
-        raise NotImplementedError("get_home_ee_pose() 구현 필요")
+        if self._home_pose is None:
+            ee = self.get_ee_pose()
+            self._home_pose = (ee.pos_w.copy(), ee.quat_w.copy())
+            self.node.get_logger().info(
+                "Cached current TF as home EE pose "
+                f"pos={self._home_pose[0].tolist()} "
+                f"quat_wxyz={self._home_pose[1].tolist()}")
+        return self._home_pose
 
     @property
     def control_dt(self) -> float:
@@ -175,3 +260,8 @@ class RealAdapter(BaseAdapter):
 
     def get_cell_gt(self) -> BoxGtPose | None:
         return None
+
+    def close(self) -> None:
+        self.node.destroy_node()
+        if self._rclpy.ok():
+            self._rclpy.shutdown()

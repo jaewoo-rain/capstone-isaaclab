@@ -257,7 +257,14 @@ def _send_arm_goal(node, rclpy, client, arm_joints: list[str], step: ArmStep, du
     return 2
 
 
-def _send_gripper_goal(node, rclpy, client, step: GripperStep, max_effort: float) -> int:
+def _send_gripper_goal(
+    node,
+    rclpy,
+    client,
+    step: GripperStep,
+    max_effort: float,
+    allow_partial: bool,
+) -> int:
     goal = _make_gripper_goal(step.position, max_effort)
     send_future = client.send_goal_async(goal)
     rclpy.spin_until_future_complete(node, send_future)
@@ -273,6 +280,11 @@ def _send_gripper_goal(node, rclpy, client, step: GripperStep, max_effort: float
         f"[teach-replay] gripper result: {step.name} "
         f"position={result.position:.6f} effort={result.effort:.6f} "
         f"stalled={result.stalled} reached_goal={result.reached_goal}")
+    if allow_partial and not result.reached_goal:
+        print(
+            f"[teach-replay] gripper partial accepted: {step.name} "
+            "object contact can prevent reaching the commanded position")
+        return 0
     return 0 if result.reached_goal else 2
 
 
@@ -300,6 +312,10 @@ def main() -> int:
     parser.add_argument("--min-gripper-position", type=float, default=None)
     parser.add_argument("--max-gripper-position", type=float, default=None)
     parser.add_argument("--gripper-max-effort", type=float, default=None)
+    parser.add_argument(
+        "--allow-gripper-partial",
+        action="store_true",
+        help="Treat a gripper result that did not reach the target position as success.")
     parser.add_argument("--joint-state-timeout", type=float, default=5.0)
     parser.add_argument("--plan-only", action="store_true", help="Alias for default dry-run validation.")
     parser.add_argument(
@@ -390,7 +406,14 @@ def main() -> int:
             if isinstance(step, ArmStep):
                 rc = _send_arm_goal(node, rclpy, arm_client, arm_joints, step, arm_duration)
             else:
-                rc = _send_gripper_goal(node, rclpy, gripper_client, step, gripper_max_effort)
+                rc = _send_gripper_goal(
+                    node,
+                    rclpy,
+                    gripper_client,
+                    step,
+                    gripper_max_effort,
+                    args.allow_gripper_partial,
+                )
             if rc != 0:
                 print(f"[teach-replay] stopping after failed step: {step.name}")
                 return rc

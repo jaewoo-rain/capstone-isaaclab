@@ -1,19 +1,50 @@
+# OMY-F3M Teach-and-Replay Pick/Place Waypoint 설정 파일
+#
+# 이 파일은 record_teach_waypoint.py 로 기록한 관절 값들을 저장한다.
+# run_teach_pick_place.py 가 이 파일을 읽어 순서대로 관절 명령을 전송한다.
+#
+# 사용 방법:
+#   기록: python3 motion2/scripts/record_teach_waypoint.py --name <이름> --overwrite
+#   재생: python3 motion2/scripts/run_teach_pick_place.py  (dry-run 기본)
+#         python3 motion2/scripts/run_teach_pick_place.py --execute --confirm EXECUTE_TEACH_PICK_PLACE
+
+# verified: true 로 바꾸기 전까지는 실험적 파일로 간주
 verified: false
+# 로봇 런치 파일 (참고용, 실제 실행은 별도 터미널에서 미리 실행해야 함)
 bringup: omy_f3m.launch.py
+# 동작 모드: MoveIt 이나 Cartesian 이 아닌 직접 관절 제어(joint-space replay)
 mode: teach_waypoint_replay
+
+# ─── ROS2 Action 서버 이름 ─────────────────────────────────────────────────
 controller:
+  # 암 6축 제어: control_msgs/action/FollowJointTrajectory
   arm_action: /arm_controller/follow_joint_trajectory
+  # 그리퍼 제어: control_msgs/action/GripperCommand
   gripper_action: /gripper_controller/gripper_cmd
+
+# ─── Safety 파라미터 ──────────────────────────────────────────────────────
 safety:
+  # 연속된 waypoint 사이에서 어느 한 관절의 최대 허용 변위 [rad]
+  # 이 값을 초과하면 실행 전 _build_steps에서 ValueError를 발생시킨다
   max_joint_delta_per_step: 0.35
+  # 그리퍼 위치 가드: [min, max] 범위 밖의 목표값은 거부됨
+  # OMY-F3M 물리적 한계: 완전 열림=0.0, 완전 닫힘≈1.12
   min_gripper_position: 0.0
   max_gripper_position: 1.12
+  # 각 암 waypoint 이동에 허용하는 기본 시간 [s] (최소 4.0 강제)
   default_arm_duration: 5.0
+  # 그리퍼 최대 토크 [N·m]: 0.0 = 컨트롤러 기본값 사용
   default_gripper_max_effort: 0.0
+  # true이면 --execute 와 함께 --confirm EXECUTE_TEACH_PICK_PLACE 를 동시에 입력해야 함
   execute_requires_confirm: true
+  # 이 파일의 waypoint로는 MoveIt pose goal 이나 Cartesian 실행을 허용하지 않음
+  # (MoveIt은 joint wraparound trajectory를 생성할 수 있어 위험함)
   forbidden_execution:
   - MoveIt pose execute
   - Cartesian execute
+
+# ─── 관절 정의 ────────────────────────────────────────────────────────────
+# OMY-F3M 6축 암 관절 이름 (run_teach_pick_place.py의 ARM_JOINTS 와 반드시 일치)
 arm_joints:
 - joint1
 - joint2
@@ -21,19 +52,40 @@ arm_joints:
 - joint4
 - joint5
 - joint6
+# 그리퍼 관절 이름
 gripper_joint: rh_r1_joint
+
+# ─── 그리퍼 목표 위치 ─────────────────────────────────────────────────────
 gripper_targets:
-  close_gripper: 0.6
-  open_gripper: 0.0
+  close_gripper: 0.6   # 파지 시 그리퍼 목표 위치 [m] (~53% 닫힘, 물체 크기에 따라 조정)
+  open_gripper: 0.0    # 해제 시 그리퍼 목표 위치 [m] (완전 열림)
+
+# ─── 실행 시퀀스 ──────────────────────────────────────────────────────────
+# close_gripper / open_gripper 는 특수 키워드: waypoints 딕셔너리가 아닌
+# gripper_targets 값을 사용하는 GripperStep 으로 변환된다
 sequence:
-- pre_grasp
-- grasp
-- close_gripper
-- lift
-- place
-- open_gripper
-- retract
+- pre_grasp      # 파지 준비: 물체 위 접근 자세
+- grasp          # 파지 자세: 그리퍼를 물체에 밀착
+- close_gripper  # [그리퍼] 닫기 → 물체 파지
+- lift           # 들어올리기: 물체를 안전 높이로 이동
+- place          # 내려놓기: 목표 위치로 이동 후 하강
+- open_gripper   # [그리퍼] 열기 → 물체 해제
+- retract        # 복귀: 물체와 충돌 없이 후퇴하는 안전 자세
+
+# ─── Waypoint 목록 ────────────────────────────────────────────────────────
+# 각 waypoint 구조:
+#   arm:           joint1~6 목표 각도 [rad]
+#   gripper:       rh_r1_joint 목표 위치 [m]
+#   recorded_at_utc: 기록 시각 (UTC ISO 8601, 감사 로그 용도)
+#   ee_pose:       기록 당시 end-effector 자세 (참고용, 실행에 영향 없음)
+#     frame_id:    기준 프레임 (link0 = 로봇 베이스)
+#     link_name:   EE 프레임 (link6 = 6번째 링크/손목)
+#     position:    EE 위치 [m] (x, y, z)
+#     quat_wxyz:   EE 자세 쿼터니언 (w, x, y, z)
 waypoints:
+  # ── start: 홈 자세 (팔꿈치를 위로 접은 수직 대기 자세) ──────────────────
+  # joint2≈-π/2, joint3≈2.65: 팔이 위를 향해 접혀 있는 상태
+  # EE 위치: x≈-0.05, z≈0.39 (베이스 위 낮은 높이)
   start:
     arm:
       joint1: -2.3968449810713143e-05
@@ -57,6 +109,9 @@ waypoints:
         x: 0.00019489673616560806
         y: 0.00019491308665577477
         z: 0.707060145093962
+  # ── '1': 팔을 앞으로 뻗은 자세 ─────────────────────────────────────────
+  # joint2≈0.71, joint3≈0.81: 팔이 앞으로 펴진 상태
+  # EE 위치: x≈0.50, z≈0.37 (작업 테이블 앞쪽 높이)
   '1':
     arm:
       joint1: -9.587379924285257e-05
@@ -80,6 +135,9 @@ waypoints:
         x: 0.49362305337908613
         y: 0.4935933235865024
         z: 0.5062717599693645
+  # ── '2': 파지 접근 자세 (grasp 직전 낮은 위치) ─────────────────────────
+  # joint3≈0.93: '1'보다 팔꿈치가 더 내려간 상태
+  # EE 위치: x≈0.50, z≈0.34 (z가 '1'보다 약 3cm 낮음 → 물체로 하강)
   '2':
     arm:
       joint1: 1.1984224905356572e-05
@@ -103,6 +161,10 @@ waypoints:
         x: 0.49355449207520785
         y: 0.4936558166865926
         z: 0.5062985309182256
+  # ── '3': 파지 후 목표 이동 자세 (그리퍼 닫힘 상태) ─────────────────────
+  # joint1≈-0.66: 오른쪽으로 약 38도 회전 (물체를 다른 위치로 이동)
+  # gripper≈1.12: 거의 완전히 닫힘 (물체를 쥔 상태)
+  # EE 위치: x≈0.32, y≈-0.39, z≈0.39 (앞쪽에서 오른쪽으로 이동)
   '3':
     arm:
       joint1: -0.6625958107922595
@@ -126,6 +188,9 @@ waypoints:
         x: 0.6273028073932267
         y: 0.3061623189675145
         z: 0.3140920485037002
+  # ── '4': 내려놓기 자세 (place, 그리퍼 닫힘 상태) ────────────────────────
+  # joint3≈0.93: '3'보다 팔꿈치가 더 내려간 상태 (z 감소)
+  # EE 위치: x≈0.32, y≈-0.39, z≈0.34 ('3'보다 약 5cm 하강)
   '4':
     arm:
       joint1: -0.6624759685432059
@@ -149,6 +214,10 @@ waypoints:
         x: 0.6273096989523332
         y: 0.30624601079740116
         z: 0.3141537000803275
+  # ── init: 초기화 자세 (모든 관절 0, 팔을 완전히 펴 올린 수직 자세) ──────
+  # joint1~6 ≈ 0: 모든 관절이 원점 (로봇 팔이 정면 수직으로 서 있는 상태)
+  # EE 위치: x≈0.0, z≈0.75 (가장 높은 위치)
+  # 주의: gripper≈1.12 (닫힌 상태로 기록됨 — 사용 전 확인 필요)
   init:
     arm:
       joint1: 3.5952674716069715e-05

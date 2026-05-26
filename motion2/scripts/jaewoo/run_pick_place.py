@@ -83,13 +83,13 @@ MOVEIT_SUCCESS = 1
 
 # ── 단계별 이동 시간 [s] ───────────────────────────────────────────────────
 # 각 step의 특성에 맞게 개별 조정. 최소값 4.0s.
-DURATION_PRE_GRASP    = 6.0   # 1단계: 물체 위 호버 이동
-DURATION_GRASP        = 5.0   # 2단계: 물체 높이로 하강 (짧은 이동)
-DURATION_LIFT         = 5.0   # 4단계: 들어올리기 (짧은 이동)
-DURATION_TRANSPORT    = 7.0   # 5단계: place 위로 수평 이동 (가장 긴 이동)
-DURATION_PLACE_DESCEND= 5.0   # 6단계: 놓을 높이로 하강 (짧은 이동)
-DURATION_RETRACT      = 5.0   # 8단계: 들어올리기
-DURATION_HOME         = 9.0   # 9단계: 홈 복귀 (큰 이동, 여유 있게)
+DURATION_PRE_GRASP    = 8.0   # 1단계: 물체 위 호버 이동
+DURATION_GRASP        = 8.0   # 2단계: 물체 높이로 하강 (짧은 이동)
+DURATION_LIFT         = 8.0   # 4단계: 들어올리기 (짧은 이동)
+DURATION_TRANSPORT    = 8.0   # 5단계: place 위로 수평 이동 (가장 긴 이동)
+DURATION_PLACE_DESCEND= 8.0   # 6단계: 놓을 높이로 하강 (짧은 이동)
+DURATION_RETRACT      = 8.0   # 8단계: 들어올리기
+DURATION_HOME         = 8.0   # 9단계: 홈 복귀 (큰 이동, 여유 있게)
 
 # 작업 공간 (x_max=0.55: YAML '1','2' 위치 x≈0.496 커버)
 DEFAULT_WORKSPACE = {
@@ -215,13 +215,17 @@ def _send_gripper(node, rclpy, client, position: float, max_effort: float, label
     goal.command.position = float(position)
     goal.command.max_effort = float(max_effort)
     fut = client.send_goal_async(goal)
-    rclpy.spin_until_future_complete(node, fut)
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=10.0)
     handle = fut.result()
     if handle is None or not handle.accepted:
         print(f"[pick-place] {label}: gripper goal rejected")
         return False
     res_fut = handle.get_result_async()
-    rclpy.spin_until_future_complete(node, res_fut)
+    rclpy.spin_until_future_complete(node, res_fut, timeout_sec=3.0)
+    if not res_fut.done():
+        # 물체에 막혀 stall — 컨트롤러가 결과를 보내지 않는 경우 파지 성공으로 처리
+        print(f"[pick-place] {label}: gripper timeout (stalled by object) → OK")
+        return True
     r = res_fut.result().result
     # stalled=True: 물체에 막혀 정지 → 닫기 시 파지 성공을 의미하므로 OK로 처리
     ok = bool(r.reached_goal or r.stalled)
@@ -263,6 +267,7 @@ def _plan_arm_pose(
     """
     from real_moveit_common import make_move_group_goal, trajectory_delta_report
     from moveit_msgs.msg import Constraints, JointConstraint
+    from sensor_msgs.msg import JointState
 
     pos = np.array([x, y, z], dtype=np.float64)
     goal = make_move_group_goal(
@@ -282,6 +287,14 @@ def _plan_arm_pose(
         keep_orientation=True,
         planner_id="",
     )
+
+    # move_group robot state monitor 대신 현재 joint 값을 직접 start state로 주입
+    goal.request.start_state.is_diff = False
+    js = JointState()
+    js.header.stamp = node.get_clock().now().to_msg()
+    js.name = list(ARM_JOINTS)
+    js.position = current_arm.tolist()
+    goal.request.start_state.joint_state = js
 
     if constrain_joint5:
         path = Constraints()

@@ -1,3 +1,22 @@
+scp "C:\Users\jaewoo\Desktop\캡스톤\capstone-isaaclab\motion2\scripts\jaewoo\run_pick_place.py" root@omy-SNPR44B1021.local:/root/open_manipulator/motion2/scripts/jaewoo/run_pick_place.py
+
+docker cp /root/open_manipulator/motion2/scripts/jaewoo \
+    open_manipulator:/root/ros2_ws/src/open_manipulator/motion2/scripts/
+
+python3 motion2/scripts/jaewoo/run_ee_pose_move.py     --x 0.40 --y -0.11 --z 0.37     --duration 8.0     --execute --confirm EXECUTE_EE_POSE_MOVE --no-constrain-joint5 --max-joint-delta 3.0
+
+
+python3 motion2/scripts/jaewoo/go_to_start.py \
+    --execute --confirm GO_TO_START
+
+python3 motion2/scripts/jaewoo/toggle_gripper.py --execute --confirm TOGGLE_GRIPPER
+
+python3 motion2/scripts/jaewoo/run_pick_place.py \
+    --gripper-max-effort 5.0 \
+    --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
+
+
+
 # OMY-F3M 실제 로봇 제어 스크립트 (jaewoo)
 
 OMY-F3M 실제 로봇에서 Cartesian 좌표 기반 pick-and-place 및 자세 제어를 위한 스크립트 모음.
@@ -201,13 +220,13 @@ python3 motion2/scripts/jaewoo/run_pick_place.py
 
 # YAML 기본 좌표로 실제 실행
 python3 motion2/scripts/jaewoo/run_pick_place.py \
-    --execute --confirm EXECUTE_PICK_PLACE
+    --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
 
 # 좌표 직접 지정 + 실제 실행
 python3 motion2/scripts/jaewoo/run_pick_place.py \
     --pick-x 0.496 --pick-y -0.113 \
     --place-x 0.321 --place-y -0.394 \
-    --execute --confirm EXECUTE_PICK_PLACE
+    --execute --confirm EXECUTE_PICK_PLACE 
 
 # 홈 복귀 생략
 python3 motion2/scripts/jaewoo/run_pick_place.py \
@@ -217,8 +236,12 @@ python3 motion2/scripts/jaewoo/run_pick_place.py \
 # 단계별 타이핑 확인 없이 연속 실행 (주의)
 python3 motion2/scripts/jaewoo/run_pick_place.py \
     --no-step-prompts \
-    --execute --confirm EXECUTE_PICK_PLACE
-```
+    --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
+
+python3 motion2/scripts/jaewoo/run_pick_place.py \
+    --gripper-max-effort 5.0 \
+    --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
+    ```
 
 ### 옵션
 

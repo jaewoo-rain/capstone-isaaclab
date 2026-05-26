@@ -157,6 +157,8 @@ def _plan_with_constraints(
     max_joint_delta: float,
     max_segment_delta: float,
     path_joint_constraints: list[dict[str, Any]],
+    start_joint_names: list[str] | None = None,
+    start_joint_positions: list[float] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """MoveIt plan_only=True + path joint constraints 지원 버전.
 
@@ -186,6 +188,16 @@ def _plan_with_constraints(
         keep_orientation=keep_orientation,
         planner_id=planner_id,
     )
+
+    # move_group robot state monitor가 비활성일 수 있으므로 is_diff 대신 현재 joint 값을 직접 주입
+    if start_joint_names and start_joint_positions:
+        from sensor_msgs.msg import JointState
+        goal.request.start_state.is_diff = False
+        js = JointState()
+        js.header.stamp = node.get_clock().now().to_msg()
+        js.name = list(start_joint_names)
+        js.position = [float(p) for p in start_joint_positions]
+        goal.request.start_state.joint_state = js
 
     # path constraint 추가: 경로 전체에서 해당 관절 값을 유지하도록 요청
     if path_joint_constraints:
@@ -442,7 +454,7 @@ def main() -> int:
 
         # ── MoveGroup action server 대기 ──────────────────────────────────────
         print(f"[ee-pose-move] waiting for MoveGroup: {args.move_group_action}")
-        if not move_group_client.wait_for_server(timeout_sec=10.0):
+        if not move_group_client.wait_for_server(timeout_sec=3.0):
             raise RuntimeError(
                 f"MoveGroup action server not available: {args.move_group_action}")
 
@@ -474,6 +486,8 @@ def main() -> int:
             max_joint_delta=args.max_joint_delta,
             max_segment_delta=args.max_segment_delta,
             path_joint_constraints=path_joint_constraints,
+            start_joint_names=ARM_JOINTS,
+            start_joint_positions=current_arm.tolist(),
         )
 
         print(

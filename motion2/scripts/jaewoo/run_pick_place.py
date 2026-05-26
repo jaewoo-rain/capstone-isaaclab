@@ -81,6 +81,16 @@ JOINT5_TOLERANCE = 0.08
 # MoveIt 성공 코드
 MOVEIT_SUCCESS = 1
 
+# ── 단계별 이동 시간 [s] ───────────────────────────────────────────────────
+# 각 step의 특성에 맞게 개별 조정. 최소값 4.0s.
+DURATION_PRE_GRASP    = 6.0   # 1단계: 물체 위 호버 이동
+DURATION_GRASP        = 5.0   # 2단계: 물체 높이로 하강 (짧은 이동)
+DURATION_LIFT         = 5.0   # 4단계: 들어올리기 (짧은 이동)
+DURATION_TRANSPORT    = 7.0   # 5단계: place 위로 수평 이동 (가장 긴 이동)
+DURATION_PLACE_DESCEND= 5.0   # 6단계: 놓을 높이로 하강 (짧은 이동)
+DURATION_RETRACT      = 5.0   # 8단계: 들어올리기
+DURATION_HOME         = 9.0   # 9단계: 홈 복귀 (큰 이동, 여유 있게)
+
 # 작업 공간 (x_max=0.55: YAML '1','2' 위치 x≈0.496 커버)
 DEFAULT_WORKSPACE = {
     "x_min": -0.10, "x_max": 0.55,
@@ -94,7 +104,7 @@ DEFAULT_WORKSPACE = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _repo_root() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parents[2]
+    return pathlib.Path(__file__).resolve().parents[3]
 
 
 def _resolve_path(path_text: str) -> pathlib.Path:
@@ -198,7 +208,7 @@ def _send_arm_traj(node, rclpy, client, joint_names, positions, duration_s, labe
 
 
 def _send_gripper(node, rclpy, client, position: float, max_effort: float, label) -> bool:
-    """GripperCommand 전송 → True=reached_goal, False=실패."""
+    """GripperCommand 전송 → True=성공(reached_goal 또는 stalled), False=거부/통신실패."""
     from control_msgs.action import GripperCommand
 
     goal = GripperCommand.Goal()
@@ -213,10 +223,12 @@ def _send_gripper(node, rclpy, client, position: float, max_effort: float, label
     res_fut = handle.get_result_async()
     rclpy.spin_until_future_complete(node, res_fut)
     r = res_fut.result().result
+    # stalled=True: 물체에 막혀 정지 → 닫기 시 파지 성공을 의미하므로 OK로 처리
+    ok = bool(r.reached_goal or r.stalled)
     print(
         f"[pick-place] {label}: gripper pos={r.position:.4f} "
-        f"effort={r.effort:.4f} stalled={r.stalled} reached={r.reached_goal}")
-    return bool(r.reached_goal)
+        f"effort={r.effort:.4f} stalled={r.stalled} reached={r.reached_goal} → {'OK' if ok else 'FAIL'}")
+    return ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,7 +364,7 @@ def _confirm(step_name: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    scripts = str(pathlib.Path(__file__).resolve().parent)
+    scripts = str(pathlib.Path(__file__).resolve().parent.parent)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
 
@@ -399,10 +411,7 @@ def main() -> int:
     parser.add_argument("--ee-frame", default=DEFAULT_EE_FRAME)
 
     # ── 이동 파라미터 ────────────────────────────────────────────────────────
-    parser.add_argument("--duration", type=float, default=6.0,
-                        help="암 이동 시간 [s] (최소 4.0)")
-    parser.add_argument("--home-duration", type=float, default=9.0,
-                        help="홈 복귀 이동 시간 [s] (더 느리게 설정 권장)")
+    # 단계별 이동 시간은 파일 상단 DURATION_* 상수로 고정 (변경 시 상수 수정)
     parser.add_argument("--planning-time", type=float, default=5.0)
     parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--velocity-scale", type=float, default=0.03)
@@ -443,10 +452,6 @@ def main() -> int:
     if args.execute and args.confirm != CONFIRM_TEXT:
         raise RuntimeError(
             f"Refusing to execute. --confirm {CONFIRM_TEXT} 필요")
-    if args.duration < 4.0:
-        raise ValueError("--duration >= 4.0 s 필요")
-    if args.home_duration < 4.0:
-        raise ValueError("--home-duration >= 4.0 s 필요")
 
     workspace = {
         "x_min": args.x_min, "x_max": args.x_max,
@@ -579,10 +584,10 @@ def main() -> int:
             joint5_tol=args.joint5_tolerance,
         )
 
-        def do_arm_step(label: str, x: float, y: float, z: float) -> bool:
+        def do_arm_step(label: str, x: float, y: float, z: float, duration: float) -> bool:
             """plan → (실행모드: confirm → execute). 실패 시 False."""
             nonlocal current_arm
-            print(f"\n[pick-place] ▶ {label}  target=({x:.4f}, {y:.4f}, {z:.4f})")
+            print(f"\n[pick-place] ▶ {label}  target=({x:.4f}, {y:.4f}, {z:.4f})  duration={duration:.1f}s")
             ok, goal_joints = _plan_arm_pose(
                 **plan_kwargs, x=x, y=y, z=z,
                 current_arm=current_arm, label=label)
@@ -595,7 +600,7 @@ def main() -> int:
                 _confirm(label)
             success = _send_arm_traj(
                 node, rclpy, arm_client,
-                ARM_JOINTS, goal_joints.tolist(), args.duration, label)
+                ARM_JOINTS, goal_joints.tolist(), duration, label)
             if success:
                 # 실행 후 current_arm 갱신 (다음 step의 delta guard 기준)
                 current_arm = goal_joints.copy()
@@ -625,18 +630,18 @@ def main() -> int:
                 _confirm(label)
             return _send_arm_traj(
                 node, rclpy, arm_client,
-                ARM_JOINTS, home_joints, args.home_duration, label)
+                ARM_JOINTS, home_joints, DURATION_HOME, label)
 
         # ── 9단계 순서 실행 ──────────────────────────────────────────────
         steps = [
-            lambda: do_arm_step("1.pre_grasp",     pick_x,  pick_y,  approach_z),
-            lambda: do_arm_step("2.grasp",          pick_x,  pick_y,  grasp_z),
+            lambda: do_arm_step("1.pre_grasp",     pick_x,  pick_y,  approach_z, DURATION_PRE_GRASP),
+            lambda: do_arm_step("2.grasp",          pick_x,  pick_y,  grasp_z,    DURATION_GRASP),
             lambda: do_gripper_step("3.close_gripper", close_val),
-            lambda: do_arm_step("4.lift",           pick_x,  pick_y,  lift_z),
-            lambda: do_arm_step("5.transport",      place_x, place_y, lift_z),
-            lambda: do_arm_step("6.place_descend",  place_x, place_y, place_z),
+            lambda: do_arm_step("4.lift",           pick_x,  pick_y,  lift_z,     DURATION_LIFT),
+            lambda: do_arm_step("5.transport",      place_x, place_y, lift_z,     DURATION_TRANSPORT),
+            lambda: do_arm_step("6.place_descend",  place_x, place_y, place_z,    DURATION_PLACE_DESCEND),
             lambda: do_gripper_step("7.open_gripper",  open_val),
-            lambda: do_arm_step("8.retract",        place_x, place_y, lift_z),
+            lambda: do_arm_step("8.retract",        place_x, place_y, lift_z,     DURATION_RETRACT),
         ]
         if not args.no_home:
             steps.append(do_home_step)

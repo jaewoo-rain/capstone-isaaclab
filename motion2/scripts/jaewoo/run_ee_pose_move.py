@@ -80,7 +80,7 @@ _MOVEIT_SUCCESS = 1
 
 
 def _scripts_dir() -> str:
-    return str(pathlib.Path(__file__).resolve().parent)
+    return str(pathlib.Path(__file__).resolve().parent.parent)
 
 
 def _rpy_to_quat(roll: float, pitch: float, yaw: float) -> np.ndarray:

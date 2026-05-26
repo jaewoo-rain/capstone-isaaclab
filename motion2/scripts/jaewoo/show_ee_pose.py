@@ -5,13 +5,13 @@ run_ee_pose_move.py 에 바로 붙여 쓸 수 있는 --x --y --z 값을 얻을 �
 
 사용 흐름:
     1. 로봇을 원하는 위치로 이동 (teach 또는 수동 조작)
-    2. python3 motion2/scripts/show_ee_pose.py
+    2. python3 motion2/scripts/jaewoo/show_ee_pose.py
     3. 출력된 명령어를 복사해 run_ee_pose_move.py 에 사용
 
 사용 예시:
-    python3 motion2/scripts/show_ee_pose.py
-    python3 motion2/scripts/show_ee_pose.py --samples 3   # 3회 평균
-    python3 motion2/scripts/show_ee_pose.py --ee-frame link6
+    python3 motion2/scripts/jaewoo/show_ee_pose.py
+    python3 motion2/scripts/jaewoo/show_ee_pose.py --samples 3   # 3회 평균
+    python3 motion2/scripts/jaewoo/show_ee_pose.py --ee-frame link6
 """
 from __future__ import annotations
 
@@ -100,12 +100,12 @@ def main() -> int:
         print()
         print("# 바로 실행할 명령어 (dry-run):")
         print(
-            f"  python3 motion2/scripts/run_ee_pose_move.py "
+            f"  python3 motion2/scripts/jaewoo/run_ee_pose_move.py "
             f"--x {x:.6f} --y {y:.6f} --z {z:.6f}")
         print()
         print("# 실제 실행:")
         print(
-            f"  python3 motion2/scripts/run_ee_pose_move.py "
+            f"  python3 motion2/scripts/jaewoo/run_ee_pose_move.py "
             f"--x {x:.6f} --y {y:.6f} --z {z:.6f} "
             f"--execute --confirm EXECUTE_EE_POSE_MOVE")
         print(f"{'='*60}\n")

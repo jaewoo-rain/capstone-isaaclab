@@ -40,6 +40,8 @@ class ArmStep:
     positions: list[float]
     max_delta_from_previous: float
     ee_pose: dict[str, Any] | None = None
+    gripper_position: float | None = None
+    gripper_delta_from_previous: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,8 @@ def _build_steps(
     max_gripper_position: float,
     close_gripper: float | None,
     open_gripper: float | None,
+    current_gripper: float,
+    gripper_joint: str,
 ) -> list[ArmStep | GripperStep]:
     waypoints = data.get("waypoints", {})
     if not isinstance(waypoints, dict):
@@ -162,10 +166,13 @@ def _build_steps(
     _validate_gripper_position("open_gripper", open_value, min_gripper_position, max_gripper_position)
 
     previous_arm = list(current_arm)
+    previous_gripper = float(current_gripper)
     steps: list[ArmStep | GripperStep] = []
     for name in sequence:
         if name in ("close_gripper", "open_gripper"):
-            steps.append(GripperStep(name=name, position=close_value if name == "close_gripper" else open_value))
+            position = close_value if name == "close_gripper" else open_value
+            steps.append(GripperStep(name=name, position=position))
+            previous_gripper = position
             continue
 
         waypoint = waypoints.get(name)
@@ -187,11 +194,30 @@ def _build_steps(
         ee_pose = waypoint.get("ee_pose")
         if ee_pose is not None and not isinstance(ee_pose, dict):
             raise ValueError(f"waypoints.{name}.ee_pose must be a mapping when present")
+
+        gripper_position = None
+        gripper_delta = 0.0
+        gripper = waypoint.get("gripper")
+        if gripper is not None:
+            gripper_map = _as_float_map(gripper, f"waypoints.{name}.gripper")
+            if gripper_joint in gripper_map:
+                gripper_position = float(gripper_map[gripper_joint])
+                _validate_gripper_position(
+                    f"waypoints.{name}.gripper.{gripper_joint}",
+                    gripper_position,
+                    min_gripper_position,
+                    max_gripper_position,
+                )
+                gripper_delta = abs(gripper_position - previous_gripper)
+                previous_gripper = gripper_position
+
         steps.append(ArmStep(
             name=name,
             positions=positions,
             max_delta_from_previous=max_delta,
             ee_pose=ee_pose,
+            gripper_position=gripper_position,
+            gripper_delta_from_previous=gripper_delta,
         ))
         previous_arm = positions
     return steps
@@ -218,6 +244,11 @@ def _print_steps(
             print(
                 f"[teach-replay] step {idx:02d} arm {step.name}: "
                 f"max_delta={step.max_delta_from_previous:.6f} {values}")
+            if step.gripper_position is not None:
+                print(
+                    f"[teach-replay] step {idx:02d} waypoint gripper {step.name}: "
+                    f"position={step.gripper_position:.6f} "
+                    f"delta={step.gripper_delta_from_previous:.6f}")
             if step.ee_pose:
                 pos = step.ee_pose.get("position", {})
                 quat = step.ee_pose.get("quat_wxyz", {})
@@ -264,6 +295,7 @@ def _send_gripper_goal(
     step: GripperStep,
     max_effort: float,
     allow_partial: bool,
+    result_timeout_s: float,
 ) -> int:
     goal = _make_gripper_goal(step.position, max_effort)
     send_future = client.send_goal_async(goal)
@@ -274,7 +306,20 @@ def _send_gripper_goal(
         return 2
 
     result_future = handle.get_result_async()
-    rclpy.spin_until_future_complete(node, result_future)
+    rclpy.spin_until_future_complete(node, result_future, timeout_sec=result_timeout_s)
+    if not result_future.done():
+        print(
+            f"[teach-replay] gripper timeout: {step.name} "
+            f"waited={result_timeout_s:.2f}s target={step.position:.6f}")
+        cancel_future = handle.cancel_goal_async()
+        rclpy.spin_until_future_complete(node, cancel_future, timeout_sec=1.0)
+        if allow_partial:
+            print(
+                f"[teach-replay] gripper partial accepted after timeout: {step.name} "
+                "object contact can prevent action completion")
+            return 0
+        return 2
+
     result = result_future.result().result
     print(
         f"[teach-replay] gripper result: {step.name} "
@@ -313,6 +358,16 @@ def main() -> int:
     parser.add_argument("--max-gripper-position", type=float, default=None)
     parser.add_argument("--gripper-max-effort", type=float, default=None)
     parser.add_argument(
+        "--gripper-result-timeout",
+        type=float,
+        default=3.0,
+        help="Seconds to wait for a gripper action result before treating it as timeout.")
+    parser.add_argument(
+        "--waypoint-gripper-tolerance",
+        type=float,
+        default=0.02,
+        help="Send a waypoint's saved gripper command when it differs from the previous value by at least this amount.")
+    parser.add_argument(
         "--allow-gripper-partial",
         action="store_true",
         help="Treat a gripper result that did not reach the target position as success.")
@@ -336,6 +391,7 @@ def main() -> int:
     controller = data.get("controller", {})
     safety = data.get("safety", {})
     arm_joints = [str(name) for name in data.get("arm_joints", ARM_JOINTS)]
+    gripper_joint = str(data.get("gripper_joint", GRIPPER_JOINT))
     if arm_joints != ARM_JOINTS:
         raise ValueError(f"Unexpected arm_joints for OMY-F3M: {arm_joints}")
 
@@ -353,6 +409,10 @@ def main() -> int:
         raise ValueError("--max-joint-delta must be > 0")
     if min_gripper_position < 0.0 or max_gripper_position > 1.12 or min_gripper_position >= max_gripper_position:
         raise ValueError("gripper guard must stay within [0.0, 1.12] with min < max")
+    if args.waypoint_gripper_tolerance < 0.0:
+        raise ValueError("--waypoint-gripper-tolerance must be >= 0")
+    if args.gripper_result_timeout <= 0.0:
+        raise ValueError("--gripper-result-timeout must be > 0")
 
     sequence = _parse_sequence(args.sequence, data.get("sequence"))
 
@@ -365,7 +425,10 @@ def main() -> int:
         missing = [name for name in arm_joints if name not in joints]
         if missing:
             raise RuntimeError(f"Missing arm joints in /joint_states: {missing}")
+        if GRIPPER_JOINT not in joints and gripper_joint not in joints:
+            raise RuntimeError(f"Missing gripper joint in /joint_states: {gripper_joint}")
         current_arm = [float(joints[name]) for name in arm_joints]
+        current_gripper = float(joints[gripper_joint])
 
         steps = _build_steps(
             data=data,
@@ -377,6 +440,8 @@ def main() -> int:
             max_gripper_position=max_gripper_position,
             close_gripper=args.close_gripper,
             open_gripper=args.open_gripper,
+            current_gripper=current_gripper,
+            gripper_joint=gripper_joint,
         )
         _print_steps(
             steps,
@@ -405,6 +470,20 @@ def main() -> int:
                 _confirm_step(step.name)
             if isinstance(step, ArmStep):
                 rc = _send_arm_goal(node, rclpy, arm_client, arm_joints, step, arm_duration)
+                if (
+                    rc == 0
+                    and step.gripper_position is not None
+                    and step.gripper_delta_from_previous >= args.waypoint_gripper_tolerance
+                ):
+                    rc = _send_gripper_goal(
+                        node,
+                        rclpy,
+                        gripper_client,
+                        GripperStep(name=f"{step.name}.gripper", position=step.gripper_position),
+                        gripper_max_effort,
+                        args.allow_gripper_partial,
+                        args.gripper_result_timeout,
+                    )
             else:
                 rc = _send_gripper_goal(
                     node,
@@ -413,6 +492,7 @@ def main() -> int:
                     step,
                     gripper_max_effort,
                     args.allow_gripper_partial,
+                    args.gripper_result_timeout,
                 )
             if rc != 0:
                 print(f"[teach-replay] stopping after failed step: {step.name}")

@@ -27,6 +27,15 @@ parser.add_argument("--repeat", type=int, default=1)
 parser.add_argument("--hold_s", type=float, default=0.0)
 parser.add_argument("--gripper_close", type=float, default=0.8)
 parser.add_argument(
+    "--scripted",
+    action="store_true",
+    help=(
+        "Bypass camera/YOLO/RL and export a deterministic GT-based chain. "
+        "Use this when the grasp RL stage is unstable but a sim-to-real replay "
+        "dataset is still needed."
+    ),
+)
+parser.add_argument(
     "--out",
     default="motion2/config/sim_exported_pick_place_trajectory.npz",
     help="Output NPZ path. Relative paths are resolved from the current working directory.",
@@ -56,7 +65,14 @@ import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene
 
 from source.motion2.adapters.sim_adapter import SimAdapter, SimSceneCfg
-from source.motion2.inference.chain_state_machine import ChainConfig, run_chain_once
+from source.motion2.inference.chain_state_machine import (
+    ChainConfig,
+    _quat_from_z_yaw,
+    _quat_mul,
+    _stage_hold,
+    _stage_move,
+    run_chain_once,
+)
 from source.motion2.inference.grasp_policy import GraspPolicy
 from source.motion2.inference.yolo_box_detector import YoloBoxDetector
 
@@ -223,6 +239,78 @@ class RecordingSimAdapter(SimAdapter):
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def run_scripted_chain_once(adapter: RecordingSimAdapter, cfg: ChainConfig) -> dict[str, object]:
+    """GT-based pick/place chain with no camera, YOLO, or RL policy.
+
+    This intentionally mirrors the non-RL stages in run_chain_once(). It is not
+    meant to prove policy success. It exports a stable motion chain that can be
+    inspected and later converted into a real-robot replay candidate.
+    """
+    adapter.reset_to_home()
+    home_pos, home_quat = adapter.get_home_ee_pose()
+    base_ee_quat = adapter.get_base_ee_quat()
+
+    bx, by, byaw = adapter.spawn_random_box()
+    cx, cy, cyaw = adapter.spawn_random_cell()
+    adapter.step(30)
+
+    box_xy = (bx, by)
+    box_yaw = byaw
+    cell_xy = (cx, cy)
+    cell_yaw = cyaw
+
+    print(
+        f"[scripted] box gt={box_xy}, yaw={np.degrees(box_yaw):+.1f}deg  "
+        f"cell gt={cell_xy}, yaw={np.degrees(cell_yaw):+.1f}deg"
+    )
+
+    box_quat = _quat_mul(_quat_from_z_yaw(box_yaw), base_ee_quat)
+    cell_quat = _quat_mul(_quat_from_z_yaw(cell_yaw), base_ee_quat)
+
+    pre_grasp = np.array([bx, by, cfg.pre_grasp_z], dtype=np.float32)
+    grasp_pos = np.array([bx, by, cfg.grasp_z], dtype=np.float32)
+    lift_pos = np.array([bx, by, cfg.lift_z], dtype=np.float32)
+    transport_target = np.array([cx, cy, cfg.transport_z], dtype=np.float32)
+    place_pos = np.array([cx, cy, cfg.place_z], dtype=np.float32)
+    retract_pos = np.array([cx, cy, cfg.retract_z], dtype=np.float32)
+
+    _stage_move(adapter, cfg, home_pos, pre_grasp, cfg.move_above_box_s,
+                cfg.gripper_open, home_quat, box_quat)
+    _stage_move(adapter, cfg, pre_grasp, grasp_pos, cfg.descend_s,
+                cfg.gripper_open, box_quat, box_quat)
+    _stage_hold(adapter, cfg, grasp_pos, cfg.close_s, cfg.gripper_close, box_quat)
+    _stage_move(adapter, cfg, grasp_pos, lift_pos, cfg.lift_s,
+                cfg.gripper_close, box_quat, box_quat)
+    _stage_move(adapter, cfg, lift_pos, transport_target, cfg.transport_s,
+                cfg.gripper_close, box_quat, cell_quat)
+    _stage_move(adapter, cfg, transport_target, place_pos, cfg.insert_s,
+                cfg.gripper_close, cell_quat, cell_quat)
+    _stage_hold(adapter, cfg, place_pos, cfg.release_s, cfg.gripper_open, cell_quat)
+    _stage_move(adapter, cfg, place_pos, retract_pos, cfg.retract_up_s,
+                cfg.gripper_open, cell_quat, base_ee_quat)
+    _stage_move(adapter, cfg, retract_pos, home_pos, cfg.retract_home_s,
+                cfg.gripper_open, base_ee_quat, home_quat)
+
+    box_gt = adapter.get_box_gt()
+    if box_gt is not None:
+        dist = float(np.hypot(box_gt.xy[0] - cx, box_gt.xy[1] - cy))
+        insert_ok = dist < 0.05
+    else:
+        dist = float("nan")
+        insert_ok = None
+
+    return {
+        "mode": "scripted",
+        "grasp_success": True,
+        "insert_success": insert_ok,
+        "cell_xy_dist_m": dist,
+        "box_xy_est": box_xy,
+        "box_yaw_est": box_yaw,
+        "cell_xy_est": cell_xy,
+        "cell_yaw_est": cell_yaw,
+    }
+
+
 def main() -> int:
     if args_cli.num_envs != 1:
         raise ValueError("This exporter currently supports --num_envs 1 only.")
@@ -242,9 +330,15 @@ def main() -> int:
     print("[motion2 export] Sim ready.")
 
     adapter = RecordingSimAdapter(sim, scene, gripper_close=args_cli.gripper_close)
-    yolo = YoloBoxDetector(args_cli.yolo_ckpt)
-    policy = GraspPolicy(args_cli.grasp_ckpt, args_cli.grasp_vecnorm, device=args_cli.device)
     cfg = ChainConfig(gripper_close=args_cli.gripper_close)
+    yolo = None
+    policy = None
+    if args_cli.scripted:
+        print("[motion2 export] mode=scripted: camera/YOLO/RL are bypassed.")
+    else:
+        print("[motion2 export] mode=policy: loading YOLO and grasp policy.")
+        yolo = YoloBoxDetector(args_cli.yolo_ckpt)
+        policy = GraspPolicy(args_cli.grasp_ckpt, args_cli.grasp_vecnorm, device=args_cli.device)
 
     grasp_n = 0
     insert_n = 0
@@ -252,7 +346,10 @@ def main() -> int:
     for rep in range(repeat):
         print(f"\n========== export run {rep + 1}/{repeat} ==========")
         adapter.begin_run(rep)
-        result = run_chain_once(adapter, yolo, policy, cfg)
+        if args_cli.scripted:
+            result = run_scripted_chain_once(adapter, cfg)
+        else:
+            result = run_chain_once(adapter, yolo, policy, cfg)
         adapter.append_result(result)
         if result["grasp_success"]:
             grasp_n += 1

@@ -126,11 +126,11 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # xy noise 는 handoff dataset 자체에 포함됨 (collect transport stage).
     # ★ yaw noise: reset 에서 _ee_target_yaw 를 handoff(=cell정렬)에서 ±이만큼 흔들어
     #   실제 yaw 오차를 만든다(누적 IK 가 박스를 그리로 돌림) → 정책이 yaw 보정 학습(sim2real 강건성).
-    reset_yaw_noise: float = 0.0      # ±0.5→0.0: yaw 노이즈가 IK position tradeoff로 xy를 ~10cm 끌어내 xy plateau(v17/v18) → OFF.
-    #   handoff yaw 이미 정렬(2°)+누적 IK 유지면 yaw OK, xy는 handoff xy노이즈로 학습. (sim2real yaw강건성은 손목직접제어 후 재도입)
-    # ★ xy noise OFF (사용자 요청 테스트): cell xy 타겟을 박스 현재 xy로 맞춰 시작 xy 오차=0.
-    #   (handoff transport ±3~5cm xy 노이즈 무력화. v20 테스트용)
-    disable_xy_noise: bool = True
+    reset_yaw_noise: float = 0.5      # ±0.5 rad ≈ ±28.6° — yaw-only 학습에서 실제 yaw 보정 과제 생성
+    disable_xy_noise: bool = False
+    # ★ yaw-only 모드: xy 는 IK 가 cell 에 고정 holding(정책 제어X), 정책/보상/success 는 yaw 만.
+    #   누적 yaw 제어가 xy 를 끌어내는 coupling 때문에 yaw+xy 동시 학습 불가 → xy 는 motion/IK 가 잡고 RL 은 yaw 만.
+    yaw_only: bool = True
 
     # =========================
     # 8. Action scale

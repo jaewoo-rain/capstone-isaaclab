@@ -130,9 +130,13 @@ class InsertEnv(DirectRLEnv):
         actions = actions.clamp(-1.0, 1.0)
         self._actions[:] = actions
 
-        ee_pos_w = self._grip_center_pos()
-        delta_xy = actions[:, :2] * self.cfg.action_scale_xy
-        self._ee_target_xy_w = ee_pos_w[:, :2] + delta_xy
+        if not getattr(self.cfg, "yaw_only", False):
+            # 일반 모드: 정책이 xy 도 제어 (비누적, 현재 ee 기준)
+            ee_pos_w = self._grip_center_pos()
+            delta_xy = actions[:, :2] * self.cfg.action_scale_xy
+            self._ee_target_xy_w = ee_pos_w[:, :2] + delta_xy
+        # yaw-only 모드: _ee_target_xy_w 는 reset(cell_xy) 에 고정 → IK 가 xy 를 cell 에 holding.
+        #   정책의 xy action(actions[:, :2])은 무시. yaw 회전이 xy 를 끌어내도 IK 가 cell 로 되돌림.
 
         # yaw 누적: 영속 setpoint 에 Δ 누적 (grasp_env 패턴 — 복원력 확보).
         #   비누적(측정현재yaw+Δ 재계산)은 물리 드리프트를 target 이 따라가 복원력이 없어
@@ -273,13 +277,21 @@ class InsertEnv(DirectRLEnv):
             (slot_rel[:, 1].abs() < self.cfg.align_xy_threshold)
         )
         yaw_aligned = yaw_err.abs() < self.cfg.align_yaw_threshold
-        aligned = xy_aligned & yaw_aligned & is_grasping
+        # yaw-only: success/aligned 는 yaw 만 요구 (xy 는 IK holding, 학습 대상 아님)
+        if getattr(self.cfg, "yaw_only", False):
+            aligned = yaw_aligned & is_grasping
+        else:
+            aligned = xy_aligned & yaw_aligned & is_grasping
         r_success = aligned.float() * self.cfg.reward_success_bonus
 
         will_succeed = aligned & ((self._aligned_count + 1) >= self.cfg.success_hold_steps)
         r_success_lump = will_succeed.float() * self.cfg.reward_success_lump
 
-        total = r_xy_align + r_xy_align_close + r_yaw_align + r_yaw_lin + r_smooth + r_success + r_success_lump
+        if getattr(self.cfg, "yaw_only", False):
+            # xy 보상 제외 — 정책이 yaw 에만 집중 (xy coupling 이 yaw 학습 방해 안 하도록)
+            total = r_yaw_align + r_yaw_lin + r_smooth + r_success + r_success_lump
+        else:
+            total = r_xy_align + r_xy_align_close + r_yaw_align + r_yaw_lin + r_smooth + r_success + r_success_lump
 
         self.reward_log = {
             "r_xy_align": float(r_xy_align.mean().item()),
@@ -311,12 +323,15 @@ class InsertEnv(DirectRLEnv):
 
         is_grasping = self._is_grasping()
 
-        aligned = (
-            (slot_rel[:, 0].abs() < self.cfg.align_xy_threshold) &
-            (slot_rel[:, 1].abs() < self.cfg.align_xy_threshold) &
-            (yaw_err.abs() < self.cfg.align_yaw_threshold) &
-            is_grasping
-        )
+        if getattr(self.cfg, "yaw_only", False):
+            aligned = (yaw_err.abs() < self.cfg.align_yaw_threshold) & is_grasping
+        else:
+            aligned = (
+                (slot_rel[:, 0].abs() < self.cfg.align_xy_threshold) &
+                (slot_rel[:, 1].abs() < self.cfg.align_xy_threshold) &
+                (yaw_err.abs() < self.cfg.align_yaw_threshold) &
+                is_grasping
+            )
         self._aligned_count = torch.where(
             aligned, self._aligned_count + 1, torch.zeros_like(self._aligned_count)
         )

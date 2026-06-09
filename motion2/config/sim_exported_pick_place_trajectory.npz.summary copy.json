@@ -1,0 +1,88 @@
+{
+  "arm_joint_names": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6"
+  ],
+  "control_dt": 0.016666666666666666,
+  "fields": [
+    "target_pos",
+    "target_quat_wxyz",
+    "gripper_command",
+    "ee_pos",
+    "ee_quat_wxyz",
+    "arm_joint_pos",
+    "gripper_joint_pos",
+    "all_joint_pos",
+    "box_xy",
+    "box_yaw",
+    "cell_xy",
+    "cell_yaw"
+  ],
+  "gripper_joint_names": [
+    "rh_r1_joint",
+    "rh_r2",
+    "rh_l1",
+    "rh_l2"
+  ],
+  "out": "/home/jaewoo/IsaacLab/motion2/config/sim_exported_pick_place_trajectory.npz",
+  "result_summary": [
+    {
+      "box_xy_est": [
+        0.3,
+        -0.1
+      ],
+      "box_yaw_est": -0.4720047116279602,
+      "cell_xy_dist_m": 0.007555116349187382,
+      "cell_xy_est": [
+        0.3,
+        -0.3
+      ],
+      "cell_yaw_est": 1.2283426523208618,
+      "grasp_success": true,
+      "insert_success": true,
+      "mode": "scripted",
+      "run_index": 0
+    },
+    {
+      "box_xy_est": [
+        0.3,
+        -0.1
+      ],
+      "box_yaw_est": -1.0351016521453857,
+      "cell_xy_dist_m": 0.1414983911657206,
+      "cell_xy_est": [
+        0.3,
+        -0.3
+      ],
+      "cell_yaw_est": -0.7211157083511353,
+      "grasp_success": true,
+      "insert_success": false,
+      "mode": "scripted",
+      "run_index": 1
+    },
+    {
+      "box_xy_est": [
+        0.3,
+        -0.1
+      ],
+      "box_yaw_est": 0.2831973433494568,
+      "cell_xy_dist_m": 0.2157165734178006,
+      "cell_xy_est": [
+        0.3,
+        -0.3
+      ],
+      "cell_yaw_est": 1.2092258930206299,
+      "grasp_success": true,
+      "insert_success": false,
+      "mode": "scripted",
+      "run_index": 2
+    }
+  ],
+  "runs": 3,
+  "samples": 4014,
+  "schema_version": 1
+}

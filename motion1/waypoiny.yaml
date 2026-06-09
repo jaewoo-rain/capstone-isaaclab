@@ -1,0 +1,312 @@
+verified: false
+bringup: omy_f3m.launch.py
+mode: teach_waypoint_replay
+controller:
+  arm_action: /arm_controller/follow_joint_trajectory
+  gripper_action: /gripper_controller/gripper_cmd
+safety:
+  max_joint_delta_per_step: 0.35
+  min_gripper_position: 0.0
+  max_gripper_position: 1.12
+  default_arm_duration: 5.0
+  default_gripper_max_effort: 0.0
+  execute_requires_confirm: true
+  forbidden_execution:
+  - MoveIt pose execute
+  - Cartesian execute
+arm_joints:
+- joint1
+- joint2
+- joint3
+- joint4
+- joint5
+- joint6
+gripper_joint: rh_r1_joint
+gripper_targets:
+  close_gripper: 1.05
+  open_gripper: 0.0
+sequence:
+- pre_grasp
+- grasp
+- close_gripper
+- lift
+- place
+- open_gripper
+- retract
+waypoints:
+  start:
+    arm:
+      joint1: -2.3968449810713143e-05
+      joint2: -1.5706525160960323
+      joint3: 2.6531156464474592
+      joint4: -1.0819118560057805
+      joint5: 1.5706884687707483
+      joint6: 0.0
+    gripper:
+      rh_r1_joint: 0.0
+    recorded_at_utc: '2026-05-22T11:13:00.511477+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: -0.05309505555114987
+        y: -0.11299872742628406
+        z: 0.3900149295135358
+      quat_wxyz:
+        w: 0.7071533604840299
+        x: 0.00019489673616560806
+        y: 0.00019491308665577477
+        z: 0.707060145093962
+  '1':
+    arm:
+      joint1: -9.587379924285257e-05
+      joint2: 0.7092863510235287
+      joint3: 0.8133933127763612
+      joint4: 0.02272209042055606
+      joint5: 1.5707483898952752
+      joint6: -1.1984224905356572e-05
+    gripper:
+      rh_r1_joint: 0.0
+    recorded_at_utc: '2026-05-22T11:13:26.408704+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.4955670661479031
+        y: -0.1130475124168927
+        z: 0.37242190947358905
+      quat_wxyz:
+        w: 0.5063504884376635
+        x: 0.49362305337908613
+        y: 0.4935933235865024
+        z: 0.5062717599693645
+  '2':
+    arm:
+      joint1: 1.1984224905356572e-05
+      joint2: 0.7149548894037624
+      joint3: 0.930850701073761
+      joint4: -0.10042780470688807
+      joint5: 1.5706645003209376
+      joint6: 5.992112452678286e-05
+    gripper:
+      rh_r1_joint: 0.0
+    recorded_at_utc: '2026-05-22T11:14:02.577514+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.496275925263806
+        y: -0.11299405252581086
+        z: 0.3445017624351734
+      quat_wxyz:
+        w: 0.5063296313607601
+        x: 0.49355449207520785
+        y: 0.4936558166865926
+        z: 0.5062985309182256
+  '3':
+    arm:
+      joint1: -0.6625958107922595
+      joint2: 0.7174356239591712
+      joint3: 0.7079680862839395
+      joint4: 0.11987820172828179
+      joint5: 1.5708202952447072
+      joint6: -8.3889574337496e-05
+    gripper:
+      rh_r1_joint: 1.1198059751565181
+    recorded_at_utc: '2026-05-22T11:15:19.376078+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.32077782629296503
+        y: -0.3936152682982562
+        z: 0.39236101492578734
+      quat_wxyz:
+        w: 0.6435075814221303
+        x: 0.6273028073932267
+        y: 0.3061623189675145
+        z: 0.3140920485037002
+  '4':
+    arm:
+      joint1: -0.6624759685432059
+      joint2: 0.7150507632030052
+      joint3: 0.9309106221982878
+      joint4: -0.10055963118084699
+      joint5: 1.570844263694518
+      joint6: 3.5952674716069715e-05
+    gripper:
+      rh_r1_joint: 1.1198059751565181
+    recorded_at_utc: '2026-05-22T11:15:46.898428+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.32180598708388863
+        y: -0.39434959861580127
+        z: 0.34445393263682467
+      quat_wxyz:
+        w: 0.6434309405032143
+        x: 0.6273096989523332
+        y: 0.30624601079740116
+        z: 0.3141537000803275
+  init:
+    arm:
+      joint1: 3.5952674716069715e-05
+      joint2: 5.992112452678286e-05
+      joint3: -5.992112452678286e-05
+      joint4: -4.7936899621426287e-05
+      joint5: -8.3889574337496e-05
+      joint6: 1.1984224905356572e-05
+    gripper:
+      rh_r1_joint: 1.1198059751565181
+    recorded_at_utc: '2026-05-22T11:16:48.801350+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 1.3326458081157644e-05
+        y: -0.11299999959390977
+        z: 0.7534999994238618
+      quat_wxyz:
+        w: 0.9999999995511824
+        x: 1.5798381113252271e-09
+        y: -1.7976337315758034e-05
+        z: -2.3968449792497168e-05
+  new1:
+    arm:
+      joint1: -0.011073423812549473
+      joint2: 0.7164169648422158
+      joint3: 0.8007739239510208
+      joint4: 0.027935228254386168
+      joint5: 1.5710000586182875
+      joint6: 0.011037471137833403
+    gripper:
+      rh_r1_joint: 0.0
+    recorded_at_utc: '2026-05-27T10:20:45.182304+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.49556653297629405
+        y: -0.11849477098090193
+        z: 0.3725037265300366
+      quat_wxyz:
+        w: 0.5064047135696702
+        x: 0.4935295797094186
+        y: 0.4935529520208535
+        z: 0.5063480063926058
+  new2:
+    arm:
+      joint1: -0.011133344937076255
+      joint2: 0.7187538886987603
+      joint3: 0.8944426258112878
+      joint4: -0.06773483916507535
+      joint5: 1.5709760901684768
+      joint6: 0.011145329161981611
+    gripper:
+      rh_r1_joint: 0.0
+    recorded_at_utc: '2026-05-27T10:20:57.537804+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.4961133153380643
+        y: -0.11853063250396328
+        z: 0.3510192251887511
+      quat_wxyz:
+        w: 0.5063125434280167
+        x: 0.49360016927079037
+        y: 0.4936584621652461
+        z: 0.5062685097810691
+  new3:
+    arm:
+      joint1: -0.011061439587644115
+      joint2: 0.7335783749066864
+      joint3: 0.6420308808546676
+      joint4: 0.16969662465984905
+      joint5: 1.5710959324175304
+      joint6: 0.011205250286508395
+    gripper:
+      rh_r1_joint: 0.7378447589729934
+    recorded_at_utc: '2026-05-27T10:22:30.531581+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: 0.49488580341948507
+        y: -0.11848128612737363
+        z: 0.4004906769580361
+      quat_wxyz:
+        w: 0.5062973920069466
+        x: 0.49354741147309034
+        y: 0.49361346424899494
+        z: 0.5063789602533689
+  new4:
+    arm:
+      joint1: -2.901704423659271
+      joint2: 0.733494485332349
+      joint3: 0.6421627073286266
+      joint4: 0.1696846404349437
+      joint5: 1.571143869317152
+      joint6: 0.011037471137833403
+    gripper:
+      rh_r1_joint: 0.7378447589729934
+    recorded_at_utc: '2026-05-27T10:23:22.014120+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: -0.5087960917658819
+        y: -0.00811943205338678
+        z: 0.4004827460034505
+      quat_wxyz:
+        w: 0.5657173948868541
+        x: 0.5514678317534869
+        y: -0.42796754067414233
+        z: -0.4389656521789211
+  new6:
+    arm:
+      joint1: -2.967929250486271
+      joint2: 0.9940315347748009
+      joint3: 1.3596702366372297
+      joint4: -0.8081801749425311
+      joint5: 1.5726418974303216
+      joint6: -0.18600715475603935
+    gripper:
+      rh_r1_joint: 0.7378447589729934
+    recorded_at_utc: '2026-05-27T10:23:42.102518+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: -0.49043677838603217
+        y: 0.0286880614211171
+        z: 0.154296262946826
+      quat_wxyz:
+        w: 0.5045956171308348
+        x: 0.4891453146320802
+        y: -0.49847531008572965
+        z: -0.5075849579930148
+  new7:
+    arm:
+      joint1: -2.967593692188921
+      joint2: 1.3215364329883852
+      joint3: 1.210179015167812
+      joint4: -0.9862298043614137
+      joint5: 1.5726179289805107
+      joint6: -0.18619890235452505
+    gripper:
+      rh_r1_joint: 0.6780195082454534
+    recorded_at_utc: '2026-05-27T10:26:30.861416+00:00'
+    ee_pose:
+      frame_id: link0
+      link_name: link6
+      position:
+        x: -0.4928605864492387
+        y: 0.02809912852213946
+        z: 0.05542942089164858
+      quat_wxyz:
+        w: 0.5046374390377875
+        x: 0.4891756208138794
+        y: -0.4984332711847138
+        z: -0.5075554563777686

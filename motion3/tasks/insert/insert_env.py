@@ -381,7 +381,11 @@ class InsertEnv(DirectRLEnv):
         # ---- 내부 상태 적용 ----
         # _ee_target_xy_w / _ee_target_yaw 는 첫 _pre_physics_step 호출에서 actual ee 기준으로
         # 재계산되므로 placeholder 만 두면 됨 (handoff 자세 그대로)
-        self._cell_xy[env_ids_t] = cell_xy_d
+        # xy noise OFF 테스트: cell xy 타겟을 박스 현재 xy 로 → 시작 xy 오차=0 (handoff xy노이즈 무력화)
+        if getattr(self.cfg, "disable_xy_noise", False):
+            self._cell_xy[env_ids_t] = box_pos_env_d[:, :2]
+        else:
+            self._cell_xy[env_ids_t] = cell_xy_d
         self._cell_yaw[env_ids_t] = cell_yaw_d
         # ★ yaw noise: setpoint 를 handoff(cell정렬)에서 ±reset_yaw_noise 흔든다.
         #   누적 IK 가 박스를 이 setpoint 로 돌려 실제 yaw 오차 발생 → 정책이 보정 학습.

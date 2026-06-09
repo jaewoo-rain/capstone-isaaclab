@@ -46,7 +46,27 @@ def _load_npz(path: pathlib.Path):
         raise ValueError(f"arm_joint_pos must have shape (N, 6), got {arm.shape}")
     if len(time_s) != len(arm) or len(gripper) != len(arm):
         raise ValueError("time_s, arm_joint_pos, gripper_command lengths differ")
-    return time_s, arm, gripper
+    run_index = np.asarray(data["run_index"], dtype=np.int32) if "run_index" in data.files else None
+    return time_s, arm, gripper, run_index
+
+
+def _filter_run(
+    time_s: np.ndarray,
+    arm: np.ndarray,
+    gripper: np.ndarray,
+    run_index_array: np.ndarray | None,
+    run_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if run_index_array is None:
+        if run_index != 0:
+            raise ValueError("NPZ has no run_index array; only --run-index 0 is valid")
+        return time_s, arm, gripper
+
+    available = sorted(set(int(v) for v in run_index_array.tolist()))
+    if run_index not in available:
+        raise ValueError(f"--run-index {run_index} not found; available={available}")
+    mask = run_index_array == int(run_index)
+    return time_s[mask], arm[mask], gripper[mask]
 
 
 def _joint_state_once(node, rclpy, timeout_s: float) -> dict[str, float]:
@@ -188,6 +208,7 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--npz", default=DEFAULT_NPZ)
+    parser.add_argument("--run-index", type=int, default=0)
     parser.add_argument("--arm-action", default=DEFAULT_ARM_ACTION)
     parser.add_argument("--gripper-action", default=DEFAULT_GRIPPER_ACTION)
     parser.add_argument("--downsample-stride", type=int, default=5)
@@ -212,7 +233,9 @@ def main() -> int:
         raise ValueError("--duration-scale must be >= 1.0")
 
     path = _resolve_path(args.npz)
-    time_s, arm, gripper = _load_npz(path)
+    time_s_raw, arm_raw, gripper_raw, run_index_array = _load_npz(path)
+    time_s, arm, gripper = _filter_run(
+        time_s_raw, arm_raw, gripper_raw, run_index_array, args.run_index)
     keep = _downsample_indices(len(arm), args.downsample_stride, gripper, args.gripper_change_tol)
     segments = _split_segments(keep, gripper, args.gripper_change_tol)
 
@@ -222,6 +245,7 @@ def main() -> int:
     replay_duration = sim_duration * args.duration_scale
 
     print(f"[sim-replay] file: {path}")
+    print(f"[sim-replay] run_index={args.run_index}")
     print(f"[sim-replay] execute={args.execute} arm_only={args.arm_only}")
     print(f"[sim-replay] raw_samples={len(arm)} downsampled_points={len(keep)} segments={len(segments)}")
     print(f"[sim-replay] sim_duration={sim_duration:.3f}s replay_duration≈{replay_duration:.3f}s")

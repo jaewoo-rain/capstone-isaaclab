@@ -34,6 +34,23 @@ def _load_npz(path: pathlib.Path):
     return data
 
 
+def _filter_run(data, run_index: int):
+    time_s = np.asarray(data["time_s"], dtype=np.float64)
+    arm = np.asarray(data["arm_joint_pos"], dtype=np.float64)
+    gripper = np.asarray(data["gripper_command"], dtype=np.float64)
+    if "run_index" not in data.files:
+        if run_index != 0:
+            raise ValueError("NPZ has no run_index array; only --run-index 0 is valid")
+        return time_s, arm, gripper
+
+    runs = np.asarray(data["run_index"], dtype=np.int32)
+    available = sorted(set(int(v) for v in runs.tolist()))
+    if run_index not in available:
+        raise ValueError(f"--run-index {run_index} not found; available={available}")
+    mask = runs == int(run_index)
+    return time_s[mask], arm[mask], gripper[mask]
+
+
 def _transition_indices(values: np.ndarray, tol: float) -> list[int]:
     changes = np.flatnonzero(np.abs(np.diff(values)) > tol) + 1
     return [int(i) for i in changes]
@@ -50,6 +67,7 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--npz", default=DEFAULT_NPZ)
+    parser.add_argument("--run-index", type=int, default=0)
     parser.add_argument("--downsample-stride", type=int, default=5)
     parser.add_argument("--max-segment-delta", type=float, default=0.25)
     parser.add_argument("--max-abs-joint", type=float, default=3.2)
@@ -58,9 +76,7 @@ def main() -> int:
 
     path = _resolve_path(args.npz)
     data = _load_npz(path)
-    time_s = np.asarray(data["time_s"], dtype=np.float64)
-    arm = np.asarray(data["arm_joint_pos"], dtype=np.float64)
-    gripper = np.asarray(data["gripper_command"], dtype=np.float64)
+    time_s, arm, gripper = _filter_run(data, args.run_index)
 
     if arm.ndim != 2 or arm.shape[1] != 6:
         raise ValueError(f"arm_joint_pos must have shape (N, 6), got {arm.shape}")
@@ -89,6 +105,7 @@ def main() -> int:
     transitions = _transition_indices(gripper, args.gripper_change_tol)
 
     print(f"[inspect-sim-export] file: {path}")
+    print(f"[inspect-sim-export] run_index: {args.run_index}")
     print(f"[inspect-sim-export] samples: {len(arm)}")
     print(f"[inspect-sim-export] time: start={time_s[0]:.6f}s end={time_s[-1]:.6f}s duration={duration:.6f}s")
     print(f"[inspect-sim-export] gripper command range: {gripper.min():.6f} .. {gripper.max():.6f}")

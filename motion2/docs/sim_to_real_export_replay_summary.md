@@ -397,3 +397,138 @@ python3 motion2/scripts/run_sim_exported_trajectory_real.py \
 ```
 
 실제 실행은 dry-run 결과와 로봇 주변 안전을 확인한 뒤에만 진행한다.
+
+## 15. 실제 OMY-F3M 실행 결과
+
+최종적으로 `run_index 0` trajectory를 실제 OMY-F3M에서 replay했다.
+
+실행은 한 번에 바로 전체 execute하지 않고, 다음 순서로 단계적으로 검증했다.
+
+```text
+1. inspect
+2. full replay dry-run
+3. arm-only segment 1 execute
+4. arm-only segment 2 execute
+5. arm-only segment 3 execute
+6. gripper 포함 full replay execute
+7. start 자세 복귀 후 처음부터 다시 full replay execute
+```
+
+확인된 결과:
+
+```text
+arm-only segment 1: 성공
+arm-only segment 2: 성공
+arm-only segment 3: 성공
+gripper 포함 full replay: 성공
+start 복귀 후 재실행: 성공
+```
+
+즉 이번 작업의 최종 결과는 다음과 같다.
+
+```text
+IsaacLab에서 export한 scripted pick-and-place trajectory를
+실제 OMY-F3M에서 gripper 포함 전체 replay하는 데 성공했다.
+```
+
+## 16. 실제 실행에 사용한 주요 명령
+
+성공 run 검사:
+
+```bash
+python3 motion2/scripts/inspect_sim_exported_trajectory.py \
+  --npz "motion2/config/sim_exported_pick_place_trajectory copy.npz" \
+  --run-index 0
+```
+
+전체 dry-run:
+
+```bash
+python3 motion2/scripts/run_sim_exported_trajectory_real.py \
+  --npz "motion2/config/sim_exported_pick_place_trajectory copy.npz" \
+  --run-index 0
+```
+
+팔만 segment별 실행:
+
+```bash
+python3 motion2/scripts/run_sim_exported_trajectory_real.py \
+  --npz "motion2/config/sim_exported_pick_place_trajectory copy.npz" \
+  --run-index 0 \
+  --start-segment 1 \
+  --end-segment 1 \
+  --arm-only \
+  --duration-scale 3.0 \
+  --execute \
+  --confirm EXECUTE_SIM_EXPORTED_TRAJECTORY
+```
+
+segment 2부터 이어서 실행할 때는 다음 옵션을 사용했다.
+
+```bash
+--start-segment 2
+--end-segment 2
+```
+
+segment 3도 같은 방식으로 실행했다.
+
+```bash
+--start-segment 3
+--end-segment 3
+```
+
+그리퍼 포함 전체 실행:
+
+```bash
+python3 motion2/scripts/run_sim_exported_trajectory_real.py \
+  --npz "motion2/config/sim_exported_pick_place_trajectory copy.npz" \
+  --run-index 0 \
+  --duration-scale 3.0 \
+  --execute \
+  --confirm EXECUTE_SIM_EXPORTED_TRAJECTORY
+```
+
+처음 자세 복귀:
+
+```bash
+python3 motion2/scripts/jaewoo/go_to_start.py \
+  --duration 10.0 \
+  --execute \
+  --confirm GO_TO_START
+```
+
+## 17. 중간 문제와 해결
+
+처음 arm-only 전체 replay에서 segment 1은 성공했지만 segment 2에서 controller가 goal을 reject했다.
+
+원인:
+
+```text
+trajectory point의 time_from_start가 앞쪽 여러 point에서 같은 값으로 들어가
+FollowJointTrajectory controller가 goal을 거부한 것으로 판단했다.
+```
+
+해결:
+
+```text
+first point를 1초 뒤로 두고,
+이후 point들은 sim-relative timing을 유지하면서 strictly increasing time_from_start가 되도록 수정했다.
+```
+
+또한 segment 단위로 이어서 테스트하기 위해 다음 옵션을 추가했다.
+
+```text
+--start-segment
+--end-segment
+--first-point-time
+```
+
+이후 segment 2, segment 3을 각각 이어서 실행했고 모두 성공했다.
+
+## 18. 발표용 최종 한 문장
+
+```text
+이번 주에는 IsaacLab에서 생성한 pick-and-place trajectory를 NPZ로 export하고,
+이를 실제 OMY-F3M의 FollowJointTrajectory/GripperCommand 실행으로 변환하여
+gripper 포함 전체 sim-to-real trajectory replay를 성공시켰다.
+```

@@ -128,7 +128,13 @@ def _max_delta(values: np.ndarray) -> tuple[float, str]:
     return float(delta.reshape(-1)[flat]), ARM_JOINTS[flat % 6]
 
 
-def _make_arm_goal(indices: list[int], time_s: np.ndarray, arm: np.ndarray, duration_scale: float):
+def _make_arm_goal(
+    indices: list[int],
+    time_s: np.ndarray,
+    arm: np.ndarray,
+    duration_scale: float,
+    first_point_time: float,
+):
     from control_msgs.action import FollowJointTrajectory
     from trajectory_msgs.msg import JointTrajectoryPoint
 
@@ -139,9 +145,10 @@ def _make_arm_goal(indices: list[int], time_s: np.ndarray, arm: np.ndarray, dura
         point = JointTrajectoryPoint()
         point.positions = [float(v) for v in arm[idx]]
         point.velocities = [0.0] * 6
-        t = max(0.2, (float(time_s[idx]) - t0) * duration_scale)
-        if n == 0:
-            t = 0.2
+        # Keep trajectory timestamps strictly increasing. The first point is
+        # intentionally delayed so the controller has time to accept the goal,
+        # and every following point preserves the sim-relative timing after it.
+        t = first_point_time + max(0.0, (float(time_s[idx]) - t0) * duration_scale)
         point.time_from_start.sec = int(t)
         point.time_from_start.nanosec = int((t - int(t)) * 1_000_000_000)
         goal.trajectory.points.append(point)
@@ -213,6 +220,9 @@ def main() -> int:
     parser.add_argument("--gripper-action", default=DEFAULT_GRIPPER_ACTION)
     parser.add_argument("--downsample-stride", type=int, default=5)
     parser.add_argument("--duration-scale", type=float, default=2.0)
+    parser.add_argument("--first-point-time", type=float, default=1.0)
+    parser.add_argument("--start-segment", type=int, default=1)
+    parser.add_argument("--end-segment", type=int, default=0, help="0 means through the final segment.")
     parser.add_argument("--max-start-delta", type=float, default=3.0)
     parser.add_argument("--max-segment-delta", type=float, default=0.35)
     parser.add_argument("--gripper-change-tol", type=float, default=1e-4)
@@ -237,9 +247,20 @@ def main() -> int:
     time_s, arm, gripper = _filter_run(
         time_s_raw, arm_raw, gripper_raw, run_index_array, args.run_index)
     keep = _downsample_indices(len(arm), args.downsample_stride, gripper, args.gripper_change_tol)
-    segments = _split_segments(keep, gripper, args.gripper_change_tol)
+    all_segments = _split_segments(keep, gripper, args.gripper_change_tol)
+    if args.start_segment < 1:
+        raise ValueError("--start-segment must be >= 1")
+    end_segment = args.end_segment or len(all_segments)
+    if end_segment < args.start_segment:
+        raise ValueError("--end-segment must be >= --start-segment")
+    if args.start_segment > len(all_segments):
+        raise ValueError(f"--start-segment {args.start_segment} exceeds segment count {len(all_segments)}")
+    segments = all_segments[args.start_segment - 1:end_segment]
+    if not segments:
+        raise ValueError("selected segment range is empty")
 
-    ds_arm = arm[keep]
+    selected_keep = [idx for seg in segments for idx in seg]
+    ds_arm = arm[selected_keep]
     max_seg_delta, max_seg_joint = _max_delta(ds_arm)
     sim_duration = float(time_s[-1] - time_s[0])
     replay_duration = sim_duration * args.duration_scale
@@ -247,7 +268,10 @@ def main() -> int:
     print(f"[sim-replay] file: {path}")
     print(f"[sim-replay] run_index={args.run_index}")
     print(f"[sim-replay] execute={args.execute} arm_only={args.arm_only}")
-    print(f"[sim-replay] raw_samples={len(arm)} downsampled_points={len(keep)} segments={len(segments)}")
+    print(
+        f"[sim-replay] raw_samples={len(arm)} downsampled_points={len(keep)} "
+        f"segments={len(all_segments)} selected={args.start_segment}..{end_segment}"
+    )
     print(f"[sim-replay] sim_duration={sim_duration:.3f}s replay_duration≈{replay_duration:.3f}s")
     print(f"[sim-replay] max_downsampled_segment_delta={max_seg_delta:.6f} rad joint={max_seg_joint}")
     print(f"[sim-replay] gripper sim range={float(gripper.min()):.6f}..{float(gripper.max()):.6f}")
@@ -279,7 +303,8 @@ def main() -> int:
         if missing:
             raise RuntimeError(f"/joint_states missing arm joints: {missing}")
         current_arm = np.array([current[j] for j in ARM_JOINTS], dtype=np.float64)
-        start_delta = np.abs(arm[0] - current_arm)
+        selected_first_idx = segments[0][0]
+        start_delta = np.abs(arm[selected_first_idx] - current_arm)
         max_start_delta = float(start_delta.max())
         max_start_joint = ARM_JOINTS[int(np.argmax(start_delta))]
         print(f"[sim-replay] current_to_first_delta={max_start_delta:.6f} rad joint={max_start_joint}")
@@ -294,8 +319,9 @@ def main() -> int:
             seg_delta, seg_joint = _max_delta(arm[seg])
             g0 = float(gripper[seg[0]])
             g1 = float(gripper[seg[-1]])
+            original_segment_no = args.start_segment + i - 1
             print(
-                f"[sim-replay] segment {i:02d}/{len(segments)} "
+                f"[sim-replay] segment {original_segment_no:02d}/{len(all_segments)} "
                 f"points={len(seg)} idx={seg[0]}..{seg[-1]} "
                 f"grip={g0:.3f}->{g1:.3f} max_delta={seg_delta:.6f} {seg_joint}"
             )
@@ -313,8 +339,9 @@ def main() -> int:
                 raise RuntimeError(f"gripper action server not available: {args.gripper_action}")
 
         for i, seg in enumerate(segments, start=1):
-            label = f"segment {i:02d}/{len(segments)}"
-            goal = _make_arm_goal(seg, time_s, arm, args.duration_scale)
+            original_segment_no = args.start_segment + i - 1
+            label = f"segment {original_segment_no:02d}/{len(all_segments)}"
+            goal = _make_arm_goal(seg, time_s, arm, args.duration_scale, args.first_point_time)
             if not _send_arm_segment(node, rclpy, arm_client, goal, label):
                 print(f"[sim-replay] stopping after failed {label}")
                 return 2

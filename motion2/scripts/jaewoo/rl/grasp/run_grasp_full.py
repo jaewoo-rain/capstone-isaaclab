@@ -108,8 +108,6 @@ def main() -> int:
     parser.add_argument("--orientation-tolerance",  type=float, default=0.15)
     parser.add_argument("--max-joint-delta",        type=float, default=0.35)
     parser.add_argument("--max-segment-delta",      type=float, default=0.12)
-    parser.add_argument("--no-constrain-joint5",    dest="constrain_joint5",
-                        action="store_false", default=True)
     parser.add_argument("--joint5-tolerance",       type=float, default=0.08)
     parser.add_argument("--gripper-max-effort",     type=float, default=0.0)
 
@@ -202,7 +200,7 @@ def main() -> int:
             pos_tol=args.position_tolerance, ori_tol=args.orientation_tolerance,
             velocity_scale=args.velocity_scale, acceleration_scale=args.acceleration_scale,
             max_joint_delta=args.max_joint_delta, max_segment_delta=args.max_segment_delta,
-            constrain_joint5=args.constrain_joint5, joint5_tol=args.joint5_tolerance,
+            constrain_joint5=False, joint5_tol=args.joint5_tolerance,
         )
 
         def do_arm(label, x, y, z, duration, quat=None):

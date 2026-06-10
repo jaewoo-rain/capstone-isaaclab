@@ -23,14 +23,14 @@ python3 motion2/scripts/jaewoo/rl/grasp/run_grasp.py \
 python3 motion2/scripts/jaewoo/rl/grasp/run_grasp_full.py \
     --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
     --execute --confirm EXECUTE_GRASP \
-    --no-constrain-joint5 --max-joint-delta 3.0
+    --max-joint-delta 3.0
 
 # 노이즈 없애고 싶으면
 python3 motion2/scripts/jaewoo/rl/grasp/run_grasp_full.py \
     --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
     --approach-noise 0.0 \
     --execute --confirm EXECUTE_GRASP \
-    --no-constrain-joint5 --max-joint-delta 3.0
+    --max-joint-delta 3.0
 
 
 # 집으로

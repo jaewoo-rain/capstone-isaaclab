@@ -1,21 +1,52 @@
-scp "C:\Users\jaewoo\Desktop\캡스톤\capstone-isaaclab\motion2\scripts\jaewoo\run_pick_place.py" root@omy-SNPR44B1021.local:/root/open_manipulator/motion2/scripts/jaewoo/run_pick_place.py
+# 1. Windows → 로봇 호스트 (rl 폴더 전체)
+scp -r "C:\Users\jaewoo\Desktop\캡스톤\capstone-isaaclab\motion2\scripts\jaewoo\rl" root@omy-SNPR44B1021.local:/root/open_manipulator/motion2/scripts/jaewoo/
 
-docker cp /root/open_manipulator/motion2/scripts/jaewoo \
-    open_manipulator:/root/ros2_ws/src/open_manipulator/motion2/scripts/
+# 2. 로봇 호스트 → Docker 컨테이너
+docker cp /root/open_manipulator/motion2/scripts/jaewoo/rl \
+    open_manipulator:/root/ros2_ws/src/open_manipulator/motion2/scripts/jaewoo/
 
-python3 motion2/scripts/jaewoo/run_ee_pose_move.py     --x 0.40 --y -0.11 --z 0.37     --duration 8.0     --execute --confirm EXECUTE_EE_POSE_MOVE --no-constrain-joint5 --max-joint-delta 3.0
+
+python3 motion2/scripts/jaewoo/run_ee_pose_move.py     --x 0.41 --y -0.15 --z 0.3724     --duration 8.0     --execute --confirm EXECUTE_EE_POSE_MOVE --no-constrain-joint5 --max-joint-delta 3.0
+
+python3 motion2/scripts/jaewoo/rl/grasp/run_grasp.py \
+    --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
+    --no-align-yaw \
+    --execute --confirm EXECUTE_GRASP \
+    --no-constrain-joint5 --max-joint-delta 3.0
+
+python3 motion2/scripts/jaewoo/rl/grasp/run_grasp.py \
+    --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
+    --execute --confirm EXECUTE_GRASP \
+    --no-constrain-joint5 --max-joint-delta 3.0
+----
+# 기본 (4cm 노이즈)
+python3 motion2/scripts/jaewoo/rl/grasp/run_grasp_full.py \
+    --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
+    --execute --confirm EXECUTE_GRASP \
+    --no-constrain-joint5 --max-joint-delta 3.0
+
+# 노이즈 없애고 싶으면
+python3 motion2/scripts/jaewoo/rl/grasp/run_grasp_full.py \
+    --box-x 0.45 --box-y -0.10 --box-yaw 0.0 \
+    --approach-noise 0.0 \
+    --execute --confirm EXECUTE_GRASP \
+    --no-constrain-joint5 --max-joint-delta 3.0
 
 
+# 집으로
 python3 motion2/scripts/jaewoo/go_to_start.py \
     --execute --confirm GO_TO_START
 
+# 토글
 python3 motion2/scripts/jaewoo/toggle_gripper.py --execute --confirm TOGGLE_GRIPPER
 
 python3 motion2/scripts/jaewoo/run_pick_place.py \
     --gripper-max-effort 5.0 \
     --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
 
-
+python3 motion2/scripts/jaewoo/run_pick_place.py \
+    --no-step-prompts \
+    --execute --confirm EXECUTE_PICK_PLACE --no-constrain-joint5 --max-joint-delta 3.0
 
 # OMY-F3M 실제 로봇 제어 스크립트 (jaewoo)
 

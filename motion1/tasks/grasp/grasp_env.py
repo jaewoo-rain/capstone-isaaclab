@@ -334,14 +334,16 @@ class GraspEnv(DirectRLEnv):
         n = len(env_ids)
         env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
 
-        # ----- 박스 random spawn -----
-        # xy noise ±box_spawn_xy_noise
-        noise_xy = sample_uniform(
-            -self.cfg.box_spawn_xy_noise, self.cfg.box_spawn_xy_noise,
-            (n, 2), device=self.device,
+        # ----- 박스 random spawn (polar) -----
+        # 반경 15~35cm, 전방 180도 (+X ±90°)
+        r = sample_uniform(
+            self.cfg.box_spawn_r_min, self.cfg.box_spawn_r_max, (n,), device=self.device,
         )
-        box_x = self.cfg.box_spawn_xy[0] + noise_xy[:, 0]
-        box_y = self.cfg.box_spawn_xy[1] + noise_xy[:, 1]
+        theta = sample_uniform(
+            -self.cfg.box_spawn_angle_max, self.cfg.box_spawn_angle_max, (n,), device=self.device,
+        )
+        box_x = r * torch.cos(theta)
+        box_y = r * torch.sin(theta)
         box_z = torch.full((n,), self.cfg.box_spawn_z, device=self.device)
 
         # yaw ±box_spawn_yaw_max → quat (z축 회전, isaaclab 표준 (w,x,y,z) 형식)

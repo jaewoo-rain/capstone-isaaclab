@@ -118,11 +118,13 @@ class GraspEnvCfg(DirectRLEnvCfg):
     # ee 가 고정으로 유지하는 z (motion-only 의 PRE_GRASP_Z 와 동일)
     ee_fixed_z: float = 0.17
 
-    # 박스 spawn (env-rel)
-    box_spawn_xy: tuple[float, float] = (0.45, -0.10)
+    # 박스 spawn — polar 좌표 (env-rel, robot base 기준)
+    # 전방 180도 (+X ±90°), 반경 15~35cm
     box_spawn_z: float = 0.07
-    box_spawn_xy_noise: float = 0.1      # 박스 생성 노이즈 ±10cm
-    box_spawn_yaw_max: float = 1.396     # 박스 생성 노이즈 ±80° (= 1.396 rad)
+    box_spawn_r_min: float = 0.15        # 최소 반경 15cm
+    box_spawn_r_max: float = 0.35        # 최대 반경 35cm
+    box_spawn_angle_max: float = 1.5708  # ±90° (전방 180도, +X 기준)
+    box_spawn_yaw_max: float = 1.396     # 박스 자체 yaw ±80°
 
     # ee 시작 (박스 + offset, motion-only 의 pre_grasp_offset 와 동일 발상)
     ee_offset_min_m: float = 0.03         # 그립 생성 노이즈 박스로부터 최소 3cm

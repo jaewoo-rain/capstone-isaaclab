@@ -38,10 +38,10 @@ import sys
 
 import numpy as np
 
-# rl/ 자신은 스크립트 디렉토리라 자동 import. 상위 디렉토리 2개를 path 에 추가.
-_RL_DIR = pathlib.Path(__file__).resolve().parent
-_JAEWOO_DIR = _RL_DIR.parent              # .../scripts/jaewoo  (run_pick_place)
-_SCRIPTS_DIR = _JAEWOO_DIR.parent         # .../scripts         (real_moveit_common)
+# rl/grasp/ 자신은 스크립트 디렉토리라 자동 import. 상위 디렉토리들을 path 에 추가.
+_THIS_DIR = pathlib.Path(__file__).resolve().parent   # .../rl/grasp
+_JAEWOO_DIR = _THIS_DIR.parents[1]        # .../scripts/jaewoo  (run_pick_place)
+_SCRIPTS_DIR = _THIS_DIR.parents[2]       # .../scripts         (real_moveit_common)
 for _p in (str(_JAEWOO_DIR), str(_SCRIPTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)

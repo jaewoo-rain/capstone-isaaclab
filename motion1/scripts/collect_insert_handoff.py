@@ -60,23 +60,21 @@ from stable_baselines3 import PPO
 from source.omy.omy_robot_cfg import OMY_OFF_SELF_COLLISION_CFG
 
 # -------------------- constants (env-relative) --------------------
-BOX_SPAWN = (0.30, -0.10, 0.07)
 BOX_SIZE = (0.139, 0.044, 0.118)
 BOX_MASS = 0.3
+BOX_SPAWN_Z = 0.07
 
-CELL_CENTER_X = 0.30
-CELL_CENTER_Y = -0.30
 CELL_INNER_X = 0.16
 CELL_INNER_Y = 0.065
 WALL_THICKNESS = 0.008
 WALL_HEIGHT = 0.12
 
 # z (motion-only / chain 과 동일)
-PRE_GRASP_Z = BOX_SPAWN[2] + 0.10
-GRASP_Z     = BOX_SPAWN[2] + 0.045
+PRE_GRASP_Z = BOX_SPAWN_Z + 0.10    # 0.17
+GRASP_Z     = BOX_SPAWN_Z + 0.045   # 0.115
 LIFT_Z      = 0.26
 TRANSPORT_Z = 0.26
-PLACE_Z     = BOX_SPAWN[2] + 0.095
+PLACE_Z     = BOX_SPAWN_Z + 0.095   # 0.165
 RETRACT_Z   = 0.26
 
 # stage 시간
@@ -90,13 +88,16 @@ STAGE_DURATION_S: dict[str, float] = {
 SETTLE_S = 0.5
 GRIPPER_OPEN = 0.0
 
-# 박스 random spawn (학습 grasp cfg 와 동일)
-BOX_SPAWN_XY_NOISE = 0.10
-BOX_SPAWN_YAW_MAX  = 1.396
+# 박스 spawn — polar (전방 180도, +X ±90°, 반경 15~35cm)
+BOX_SPAWN_R_MIN    = 0.15
+BOX_SPAWN_R_MAX    = 0.35
+BOX_SPAWN_ANGLE_MAX = math.pi / 2   # ±90°
+BOX_SPAWN_YAW_MAX  = 1.396          # ±80°
 
-# 셀 random spawn — collect 시점에만 random
-CELL_SPAWN_YAW_MAX = 1.396     # ±80°
-CELL_SPAWN_XY_NOISE = 0.05     # ±5cm (robot reach 안전 범위)
+# 셀 spawn — polar (360도, 반경 30~50cm)
+CELL_SPAWN_R_MIN   = 0.30
+CELL_SPAWN_R_MAX   = 0.50
+CELL_SPAWN_YAW_MAX = 1.396          # ±80°
 
 # ee 시작 offset (grasp 와 동일)
 EE_OFFSET_MIN_M = 0.03
@@ -147,7 +148,7 @@ class CollectSceneCfg(InteractiveSceneCfg):
                 static_friction=3.0, dynamic_friction=3.0,
             ),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=BOX_SPAWN),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.25, 0.0, BOX_SPAWN_Z)),
     )
 
 
@@ -348,15 +349,16 @@ def run_collect(sim, scene):
 
     # ---- random spawn helpers ----
     def random_box_spawn():
-        nx = float(torch.empty(1).uniform_(-BOX_SPAWN_XY_NOISE, BOX_SPAWN_XY_NOISE).item())
-        ny = float(torch.empty(1).uniform_(-BOX_SPAWN_XY_NOISE, BOX_SPAWN_XY_NOISE).item())
-        bx_ = BOX_SPAWN[0] + nx
-        by_ = BOX_SPAWN[1] + ny
+        """박스 polar spawn — 전방 180도 (+X ±90°), 반경 15~35cm."""
+        r   = float(torch.empty(1).uniform_(BOX_SPAWN_R_MIN, BOX_SPAWN_R_MAX).item())
+        ang = float(torch.empty(1).uniform_(-BOX_SPAWN_ANGLE_MAX, BOX_SPAWN_ANGLE_MAX).item())
+        bx_ = r * math.cos(ang)
+        by_ = r * math.sin(ang)
         yaw = float(torch.empty(1).uniform_(-BOX_SPAWN_YAW_MAX, BOX_SPAWN_YAW_MAX).item())
         box_pos_w = torch.tensor(
             [[bx_ + env_origin[0].item(),
               by_ + env_origin[1].item(),
-              BOX_SPAWN[2] + env_origin[2].item()]],
+              BOX_SPAWN_Z + env_origin[2].item()]],
             device=device, dtype=torch.float)
         z_axis = torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)
         box_quat = quat_from_angle_axis(
@@ -368,11 +370,11 @@ def run_collect(sim, scene):
         return bx_, by_, yaw
 
     def random_cell_pose():
-        """cell xy ±2cm + yaw ±80° random."""
-        nx = float(torch.empty(1).uniform_(-CELL_SPAWN_XY_NOISE, CELL_SPAWN_XY_NOISE).item())
-        ny = float(torch.empty(1).uniform_(-CELL_SPAWN_XY_NOISE, CELL_SPAWN_XY_NOISE).item())
-        cx_ = CELL_CENTER_X + nx
-        cy_ = CELL_CENTER_Y + ny
+        """셀 polar spawn — 360도, 반경 30~50cm, yaw ±80°."""
+        r    = float(torch.empty(1).uniform_(CELL_SPAWN_R_MIN, CELL_SPAWN_R_MAX).item())
+        ang  = float(torch.empty(1).uniform_(-math.pi, math.pi).item())
+        cx_  = r * math.cos(ang)
+        cy_  = r * math.sin(ang)
         cyaw_ = float(torch.empty(1).uniform_(-CELL_SPAWN_YAW_MAX, CELL_SPAWN_YAW_MAX).item())
         return cx_, cy_, cyaw_
 

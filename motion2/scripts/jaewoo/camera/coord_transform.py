@@ -55,6 +55,31 @@ def quat_from_z_yaw(yaw: float) -> np.ndarray:
     return np.array([math.cos(half), 0.0, 0.0, math.sin(half)], dtype=np.float64)
 
 
+def yaw_cam_to_base(yaw_cam: float, T_cam2base: np.ndarray) -> float:
+    """카메라 optical 프레임 기준 in-plane yaw → link0(base) 기준 yaw [rad].
+
+    minAreaRect/PCA 가 내는 yaw_cam 은 optical 픽셀 평면(x=오른쪽, y=아래) 안의 각도다.
+    이를 base yaw 로 바꾸려면 optical 평면 안의 방향벡터 [cos, sin, 0] 을 extrinsic
+    회전행렬(R_cam2base)로 통째로 돌려 base XY 에 투영한 뒤 atan2 한다.
+
+    이 한 방법이 ① in-plane 회전(카메라가 base 와 이루는 yaw) ② 카메라 기울기
+    ③ optical y=아래(Y-down)로 인한 부호 뒤집힘 을 모두 일관되게 처리한다.
+    (단축식 atan2(r10, r00) 은 optical 평면이 base 평면과 평행할 때만 맞음.)
+
+    Args:
+        yaw_cam     : optical 프레임 기준 yaw [rad]
+        T_cam2base  : 4×4 (camera optical → link0) 변환 행렬
+
+    Returns:
+        link0 기준 yaw [rad], wrap_to_pi.
+    """
+    R = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
+    d_cam = np.array([math.cos(yaw_cam), math.sin(yaw_cam), 0.0], dtype=np.float64)
+    d_base = R @ d_cam
+    yaw = math.atan2(float(d_base[1]), float(d_base[0]))
+    return (yaw + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def _load_yaml(path: pathlib.Path) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -105,6 +130,22 @@ class CeilingTransform:
 # TF2 유틸 — 손목캠은 이걸로 충분 (URDF 가 camera_joint 이미 정의)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ensure_tf_buffer(node):
+    """node 에 TF2 Buffer/Listener 를 1회만 붙이고 재사용한다.
+
+    ⚠️ 매 프레임 새 Buffer 를 만들면 히스토리가 비어 매번 spin 으로 채워야 하고
+       timeout 위험이 크다(손목캠 고주파 루프에서 치명적). camera_joint 는 고정
+       joint → /tf_static 에 latch 되므로, 버퍼만 유지하면 워밍업 후 lookup 은 즉시다.
+    """
+    from tf2_ros import Buffer, TransformListener
+
+    if getattr(node, "_coord_tf_buffer", None) is None:
+        node._coord_tf_buffer = Buffer()
+        # listener 참조도 node 에 보관(GC 방지). 버퍼와 한 쌍으로 유지.
+        node._coord_tf_listener = TransformListener(node._coord_tf_buffer, node)
+    return node._coord_tf_buffer
+
+
 def lookup_T_frame(
     node,
     rclpy,
@@ -127,10 +168,7 @@ def lookup_T_frame(
     Raises:
         RuntimeError : timeout 내 조회 실패 시
     """
-    from tf2_ros import Buffer, TransformListener
-
-    tf_buffer = Buffer()
-    node._coord_tf_listener = TransformListener(tf_buffer, node)
+    tf_buffer = _ensure_tf_buffer(node)
 
     deadline = node.get_clock().now() + rclpy.duration.Duration(seconds=timeout_sec)
     while rclpy.ok():

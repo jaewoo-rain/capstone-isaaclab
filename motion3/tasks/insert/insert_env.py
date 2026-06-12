@@ -78,6 +78,9 @@ class InsertEnv(DirectRLEnv):
         # internal state (per env)
         self._ee_target_xy_w = torch.zeros(self.num_envs, 2, device=self.device)
         self._ee_target_yaw = torch.zeros(self.num_envs, device=self.device)
+        # ★ wrap-safe: reset 시 고정되는 yaw setpoint 기준값(=handoff 그리퍼 yaw, ~±180°).
+        #   누적 setpoint 는 _yaw_ref ± yaw_margin 로만 제한 → ±π wrap 경계 회피.
+        self._yaw_ref = torch.zeros(self.num_envs, device=self.device)
         self._cell_xy = torch.zeros(self.num_envs, 2, device=self.device)
         self._cell_yaw = torch.zeros(self.num_envs, device=self.device)
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
@@ -142,8 +145,11 @@ class InsertEnv(DirectRLEnv):
         #   비누적(측정현재yaw+Δ 재계산)은 물리 드리프트를 target 이 따라가 복원력이 없어
         #   yaw 가 래칫처럼 멀어지는 회귀 버그였음. setpoint 를 고정 누적해야 IK 가 되돌림.
         delta_yaw = actions[:, 2] * self.cfg.action_scale_yaw
+        # ★ wrap-safe: 절대 ±π clamp 대신 reset 기준값 _yaw_ref ± margin 로 제한.
+        #   margin 이 _yaw_ref 와 함께 움직이므로 setpoint 가 고정 wrap 경계(±π)에 물리지 않음.
+        m = self.cfg.yaw_margin
         self._ee_target_yaw = (self._ee_target_yaw + delta_yaw).clamp(
-            self.cfg.ee_yaw_min, self.cfg.ee_yaw_max
+            self._yaw_ref - m, self._yaw_ref + m
         )
 
     def _apply_action(self) -> None:
@@ -405,9 +411,11 @@ class InsertEnv(DirectRLEnv):
         # ★ yaw noise: setpoint 를 handoff(cell정렬)에서 ±reset_yaw_noise 흔든다.
         #   누적 IK 가 박스를 이 setpoint 로 돌려 실제 yaw 오차 발생 → 정책이 보정 학습.
         yaw_noise = (torch.rand(n, device=self.device) * 2.0 - 1.0) * self.cfg.reset_yaw_noise
-        self._ee_target_yaw[env_ids_t] = (ee_target_yaw_d + yaw_noise).clamp(
-            self.cfg.ee_yaw_min, self.cfg.ee_yaw_max
-        )
+        # ★ wrap-safe: 기준값 _yaw_ref 를 handoff 그리퍼 yaw(~±180°)로 고정(절대 clip 없음 —
+        #   quat 은 |yaw|>π 연속). 누적 setpoint 는 이 기준 ± margin 안에서만 움직임.
+        ref = ee_target_yaw_d + yaw_noise
+        self._yaw_ref[env_ids_t] = ref
+        self._ee_target_yaw[env_ids_t] = ref
         self._ee_target_xy_w[env_ids_t] = cell_xy_d + self.scene.env_origins[env_ids_t, :2]
 
         self._aligned_count[env_ids_t] = 0

@@ -520,17 +520,18 @@ def run_collect(sim, scene):
         align_start = torch.tensor([cur_after[0].item(), cur_after[1].item(), high_z],
                                    device=device, dtype=torch.float)
 
-        # Stage 3d-1: 높은 데서 타깃 셀 위로 수평 이동 + yaw 정렬 (하강 전 yaw 먼저)
+        # Stage 3d-1: 높은 데서 타깃 셀 위로 수평 이동 — ★xy만★ (yaw 는 turn 된 자연 상태 유지, 정렬 안 함).
+        #   yaw 정렬은 insert RL 이 전담 (방식 B). handoff 에 자연 yaw 오차가 남고, RL reset 에서 ±노이즈까지 더해 보정 학습.
         above_high = torch.tensor([cx + tx_off, cy + ty_off, high_z], device=device, dtype=torch.float)
         stage_move(align_start, above_high,
                    STAGE_DURATION_S["transport"], gripper_close,
-                   start_quat_w=turned_quat, end_quat_w=cell_target_quat)
+                   start_quat_w=turned_quat, end_quat_w=turned_quat)   # yaw 고정(turned), xy만 이동
 
-        # Stage 3d-2: 수직 하강 (high → hover), yaw 고정
-        transport_pos = torch.tensor([cx + tx_off, cy + ty_off, TRANSPORT_Z], device=device, dtype=torch.float)
-        stage_move(above_high, transport_pos,
-                   STAGE_DURATION_S["lift"], gripper_close,
-                   start_quat_w=cell_target_quat, end_quat_w=cell_target_quat)
+        # Stage 3d-2 (수직 하강) 제거 — handoff 를 "하강 전" high_z(셀 위)에서 자른다.
+        #   이전엔 0.20 으로 내려가 박스 밑면(0.04)이 셀 벽(0.12)을 7.7cm 관통한 채 저장됐음.
+        #   insert RL 은 이 높은 위치에서 yaw 정렬 → 실제 하강은 chain runner 의 motion planning 전담.
+        # 안정화: 현재(turned) 자세 잠깐 hold 후 저장
+        stage_hold(above_high, 0.2, gripper_close, hold_quat_w=turned_quat)
 
         # ---- handoff state 저장 ----
         joint_pos_now = robot.data.joint_pos[0].cpu().numpy().astype(np.float32)
@@ -539,7 +540,9 @@ def run_collect(sim, scene):
         box_quat_now = box.data.root_quat_w[0].cpu().numpy().astype(np.float32)
         cell_xy_arr = np.array([cx, cy], dtype=np.float32)
         cell_yaw_arr = np.array([cyaw], dtype=np.float32)
-        ee_target_yaw_arr = np.array([cyaw], dtype=np.float32)  # stage 3d 끝에서 ee_target_yaw 가 cyaw 로 정렬됨
+        # ★ 방식 B: 정렬 안 했으니 실제 그리퍼 yaw(=turned 자연값) 저장 → env setpoint 가 여기서 시작, RL 이 cell_yaw 로 정렬.
+        gyaw_now = float(quat_z_yaw(grip_center_quat(robot, left_id))[0].item())
+        ee_target_yaw_arr = np.array([gyaw_now], dtype=np.float32)
 
         out_joint_pos.append(joint_pos_now)
         out_box_pos_env.append(box_pos_env_now)
@@ -549,9 +552,9 @@ def run_collect(sim, scene):
         out_ee_target_yaw.append(ee_target_yaw_arr)
         collected += 1
 
-        if collected % 10 == 0 or collected == target:
+        if collected % 5 == 0 or collected == target:
             print(f"  [collect] {collected}/{target} (attempts={attempted}, "
-                  f"grasp_success_rate={collected/attempted:.2%})")
+                  f"grasp_success_rate={collected/attempted:.2%})", flush=True)
 
         # 50개마다 부분 저장 (stuck / crash 시 손실 최소화)
         if collected % 50 == 0 and collected > 0 and collected < target:

@@ -39,6 +39,9 @@ parser.add_argument("--insert_vecnorm",    type=str, default="checkpoints/motion
 parser.add_argument("--rl_max_steps", type=int, default=300,
                     help="단계 2/4 RL inference 최대 step (기본 300=5초@60Hz)")
 parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--demo_grid", action="store_true",
+                    help="5x2 그리드 순차 채우기 데모 (그리드 고정 + 셀 0→9 순차 + 놓은 박스 누적)")
+parser.add_argument("--grid_yaw", type=float, default=0.0, help="고정 그리드 yaw(도) (demo_grid)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -79,9 +82,18 @@ WALL_HEIGHT = layout.WALL_HEIGHT
 PRE_GRASP_Z = layout.PRE_GRASP_Z         # 책상 위 호버 (grasp RL ee_fixed_z)
 GRASP_Z     = layout.GRASP_Z             # 책상 위 파지
 LIFT_Z      = layout.LIFT_Z              # 책상 위로 들어 뒤로 운반
-TRANSPORT_Z = layout.INSERT_HOVER_Z      # 뒤쪽 저고도 hover (insert RL ee_fixed_z)
+# ★ RL 정렬 hover 를 벽 바로 위로 낮춤 (사용자 요청: "하강 후 정렬").
+#   기존 layout.INSERT_HOVER_Z=0.56 은 너무 높아 정렬 후 49cm 하강 → IK lag 로 grip xy 가
+#   -x 로 ~10cm 드리프트(적재 실패 주범). 0.32 = 박스 밑면 ~0.17 (벽 0.12 위 ~5cm) 로,
+#   RL 이 "벽 위에서" 정렬(셀 안 갇히기 전) + 최종 하강이 0.32→place 25cm 로 절반.
+#   insert obs 는 z-무관(slot_rel_xy/yaw/vel) → v25 정책 재학습 없이 전이. env/collect/RETRACT 는 0.56 유지.
+RL_HOVER_Z  = 0.32                       # sweet spot. 박스 밑면 ~0.17 (벽top 0.12 위 5cm).
+                                         #   0.28 로 더 내려보니 박스가 벽 모서리에 걸려 텀블(run4 33cm/yaw58° 카타스트로피).
+                                         #   0.32 는 4 run 무사고(최종 1~5cm). 벽이 하드 제약이라 더 못 내림.
+                                         #   ↑높이면 정렬 후 free 하강 길어져 드리프트↑(0.56 원본은 0.2~18cm 들쭉날쭉).
+TRANSPORT_Z = RL_HOVER_Z                  # 3d-2 가 여기까지 하강 → 그 높이에서 stage_rl_insert
 PLACE_Z     = layout.PLACE_Z             # 셀 바닥 안착
-RETRACT_Z   = layout.INSERT_HOVER_Z
+RETRACT_Z   = layout.INSERT_HOVER_Z      # retract 는 높이 복귀(0.56) — 벽 클리어 후 turn
 
 # 뒤를 향한 turn-around seed (joint1 ~-170°). transport에서 joint1을 먼저 돌려야 자연스럽게 reach.
 BACK_HOME_JOINTS = {"joint1": -2.90, "joint2": 0.73, "joint3": 0.64,
@@ -95,7 +107,7 @@ STAGE_DURATION_S: dict[str, float] = {
     "lift":           2.0,    # 3c
     "transport":      3.0,    # 3d
     "align_insert":   0.6,    # 4
-    "insert":         1.5,    # 5a
+    "insert":         2.5,    # 5a (1.5→2.5: 최종 하강 느리게 → step당 z이동↓ → DLS lag 드리프트↓)
     "release":        0.7,    # 5b
     "retract_up":     1.5,    # 6a
     "retract_home":   3.0,    # 6b
@@ -125,9 +137,12 @@ RL_GRASP_ACTION_SCALE_YAW = 0.05   # grasp_env_cfg: ~2.86°/step
 RL_INSERT_ACTION_SCALE_XY = 0.005  # insert_env_cfg: 5mm/step (변경됨)
 RL_INSERT_ACTION_SCALE_YAW = 0.05  # insert_env_cfg: ~2.86°/step
 
-# RL ee yaw clip (학습 cfg 와 동일)
+# RL ee yaw clip (grasp 학습 cfg 와 동일 — grasp 만 사용)
 RL_EE_YAW_MIN = -1.5708
 RL_EE_YAW_MAX =  1.5708
+# ★ insert v25: reference-anchored unwrap. 절대 ±π clip 폐기 → stage 진입 시 측정 grip yaw 를
+#   기준(yaw_ref)으로 ±margin 안에서만 누적. insert_env_cfg.yaw_margin 과 반드시 일치.
+RL_INSERT_YAW_MARGIN = 1.75
 
 # RL success 판정 (학습 cfg 와 동일)
 # Grasp RL success 판정 (grasp_env_cfg 와 일치)
@@ -161,6 +176,26 @@ def _grid_wall_cfg(name, size, local_xy):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.35))),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(gx + local_xy[0], gy + local_xy[1], _WALL_Z)),
+    )
+
+
+# 데모(--demo_grid)용: 셀에 안착되어 누적 표시되는 박스. kinematic, 초기엔 바닥 아래 숨김.
+N_CELL = layout.GRID_NUM_X * layout.GRID_NUM_Y
+PLACED_BOX_NAMES = [f"PlacedBox{i}" for i in range(N_CELL)]
+
+
+def _placed_box_cfg(i):
+    return RigidObjectCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/PlacedBox{i}",
+        spawn=sim_utils.CuboidCfg(
+            size=BOX_SIZE,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                rigid_body_enabled=True, kinematic_enabled=True, disable_gravity=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.3),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.85, 0.55, 0.25), metallic=0.3, roughness=0.5)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -1.0)),
     )
 
 
@@ -219,6 +254,8 @@ class MotionSceneCfg(InteractiveSceneCfg):
     def __post_init__(self):
         for _name, _size, _lxy in _WALL_SPECS:
             setattr(self, _name, _grid_wall_cfg(_name, _size, _lxy))
+        for _i in range(N_CELL):   # 데모용 누적 박스 (--demo_grid). 평소엔 바닥 아래 숨김.
+            setattr(self, f"PlacedBox{_i}", _placed_box_cfg(_i))
 
 
 # -------------------- helpers --------------------
@@ -531,17 +568,24 @@ def run_pipeline(sim, scene):
         return ee_target_yaw, success
 
     # ---- Stage 4: 학습된 insert RL 정책 inference ----
-    def stage_rl_insert(max_steps: int, cell_xy_v, cell_yaw_v: float) -> bool:
-        """학습된 PPO 정책으로 cell xy/yaw 미세 정렬. yaw 비누적, ee_z=TRANSPORT_Z 고정.
+    def stage_rl_insert(max_steps: int, cell_xy_v, cell_yaw_v: float) -> tuple[float, bool]:
+        """학습된 PPO 정책으로 cell yaw 미세 정렬(xy=cell 고정 holding). yaw 누적 setpoint anchor.
 
         cell_xy_v: (cell_x, cell_y) env-rel float tuple
         cell_yaw_v: float
+        Returns (final_ee_target_yaw, success_bool). final yaw 는 downstream 자세에 사용.
         """
         aligned_count = 0
         success = False
 
         print(f"[stage] 4. RL insert align (PPO inference) | max_steps={max_steps}")
         z_axis_t = torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)
+
+        # ★ wrap-safe yaw parity (insert_env v25 reference-anchored unwrap):
+        #   stage 진입 시 측정 grip yaw 를 기준(yaw_ref)으로 고정 → 누적 setpoint 를 ±margin 안에서만.
+        #   env reset: _yaw_ref = _ee_target_yaw = (측정)grip yaw 와 동일 convention.
+        yaw_ref = quat_z_yaw(grip_center_quat(robot, left_id))[0].item()
+        ee_target_yaw_acc = yaw_ref
 
         for step_i in range(max_steps):
             # ---- state 계산 (insert_env._get_observations 와 동일 식) ----
@@ -579,21 +623,22 @@ def run_pipeline(sim, scene):
             action, _ = insert_model.predict(obs_norm, deterministic=True)
             action = np.clip(action, -1.0, 1.0)
 
-            # ---- action 적용 (insert_env 와 동일 — 비누적 xy + 비누적 yaw) ----
-            delta_xy = action[:2] * RL_INSERT_ACTION_SCALE_XY
-            ee_target_xy_w_now = (
-                ee_pos_w[0, :2] + torch.tensor(delta_xy, device=device, dtype=torch.float))
-
+            # ---- action 적용 (insert_env v25 parity) ----
+            # 버그B 수정: env 는 yaw_only → 정책 xy action 무시, xy 는 cell 에 고정 holding.
+            #   (이전: 정책 xy 적용 → 드리프트. env 와 불일치였음.)
+            # 버그A 수정: yaw 는 누적 setpoint(yaw_ref ± margin). 비누적(측정yaw+Δ)+±90°clip 폐기.
             delta_yaw = float(action[2]) * RL_INSERT_ACTION_SCALE_YAW
-            new_yaw = max(RL_EE_YAW_MIN, min(RL_EE_YAW_MAX, cur_ee_yaw + delta_yaw))
+            ee_target_yaw_acc = min(yaw_ref + RL_INSERT_YAW_MARGIN,
+                                    max(yaw_ref - RL_INSERT_YAW_MARGIN,
+                                        ee_target_yaw_acc + delta_yaw))
 
+            # xy 는 cell 에 고정 (정책 xy 버림 — env yaw_only 와 일치)
             target_pos_env = torch.tensor(
-                [ee_target_xy_w_now[0].item() - env_origin[0].item(),
-                 ee_target_xy_w_now[1].item() - env_origin[1].item(),
-                 TRANSPORT_Z], device=device, dtype=torch.float)
+                [cell_xy_v[0], cell_xy_v[1], TRANSPORT_Z],
+                device=device, dtype=torch.float)
 
             yaw_q = quat_from_angle_axis(
-                torch.tensor([new_yaw], device=device, dtype=torch.float),
+                torch.tensor([ee_target_yaw_acc], device=device, dtype=torch.float),
                 z_axis_t)
             ee_quat_now = quat_mul(yaw_q, base_ee_quat)
 
@@ -618,7 +663,7 @@ def run_pipeline(sim, scene):
         if not success:
             print(f"  [stage 4] timeout {max_steps} steps — final aligned_count={aligned_count}")
         report("4. RL insert align")
-        return success
+        return ee_target_yaw_acc, success
 
     # ---- 매 repeat 시 박스 random spawn ----
     def random_box_spawn():
@@ -695,9 +740,16 @@ def run_pipeline(sim, scene):
         robot.set_joint_position_target(home_q)
         robot.reset()
 
-        # ---- 박스(앞,책상 위) + 그리드(뒤) random spawn, 타깃 셀 선택 ----
+        # ---- 박스(앞,책상 위) + 그리드(뒤) spawn, 타깃 셀 선택 ----
         bx, by, byaw = random_box_spawn()
-        cyaw, tgt_cell, cx, cy, walls = random_grid_target()
+        if args_cli.demo_grid:
+            # 데모: 그리드 고정(jitter 없음) + 셀 0→9 순차
+            cyaw = math.radians(args_cli.grid_yaw)
+            tgt_cell = rep % n_cells
+            walls, _cells = scene_helpers.grid_world_poses(CELL_CENTER_X, CELL_CENTER_Y, cyaw)
+            cx, cy = _cells[tgt_cell]
+        else:
+            cyaw, tgt_cell, cx, cy, walls = random_grid_target()
         update_grid_walls(walls)
         print(f"[run {rep+1}] box xy=({bx:+.3f},{by:+.3f}) yaw={math.degrees(byaw):+.1f}° "
               f"| target cell #{tgt_cell} xy=({cx:+.3f},{cy:+.3f}) grid_yaw={math.degrees(cyaw):+.1f}°")
@@ -776,20 +828,14 @@ def run_pipeline(sim, scene):
         stage_joint_move(turn_target, STAGE_DURATION_S["transport"], gripper_close,
                          "3c2. Turn around (joint1 only)")
 
-        # 박스 180° 대칭 → cyaw / cyaw+π 중 현재(돌아간)에 가까운 yaw (joint6 180° flip 방지)
+        # turn 후 자연 그리퍼 yaw — cell 로 pre-align 하지 않음(RL 이 yaw 보정 담당, sim2real 충실).
+        #   (이전: 여기서 정확한 cyaw 로 slerp 해 RL 전에 yaw 를 다 맞춰 RL 을 우회했음 → 제거.
+        #    박스 180° 대칭 + RL obs 의 fold_yaw_sym 이 branch 를 자동 처리하므로 분기 선택 불필요.)
         turned_quat = grip_center_quat(robot, left_id)[0].unsqueeze(0)
         _zaxis = torch.tensor([[0.0, 0.0, 1.0]], device=device, dtype=torch.float)
+        cell_ee_quat = turned_quat   # placeholder — stage 4 RL 후 RL 최종 yaw 로 갱신.
 
-        def _cell_quat(yv):
-            return quat_mul(quat_from_angle_axis(
-                torch.tensor([yv], device=device, dtype=torch.float), _zaxis), base_ee_quat)
-
-        _c0, _c1 = _cell_quat(cyaw), _cell_quat(cyaw + math.pi)
-        cell_target_quat = _c0 if bool(((turned_quat * _c0).sum(-1).abs()
-                                        >= (turned_quat * _c1).sum(-1).abs()).item()) else _c1
-        cell_ee_quat = cell_target_quat   # downstream(insert/place) 동일 사용
-
-        # ---- 3d-1. 높은 데서 타깃 셀 위로 + yaw 정렬 (하강 전 yaw 먼저) ----
+        # ---- 3d-1. 높은 데서 타깃 셀 위로 (xy 만, 자연 yaw 유지 — yaw 는 RL 이 보정) ----
         cur_after = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
         high_z = float(cur_after[2].item())
         align_start = torch.tensor([cur_after[0].item(), cur_after[1].item(), high_z],
@@ -798,19 +844,37 @@ def run_pipeline(sim, scene):
                                   device=device, dtype=torch.float)
         stage_move(align_start, above_high,
                    STAGE_DURATION_S["transport"], gripper_close,
-                   "3d-1. Above cell + yaw align (high)",
-                   start_quat_w=turned_quat, end_quat_w=cell_target_quat)
+                   "3d-1. Above cell (xy only, hold natural yaw)",
+                   start_quat_w=turned_quat, end_quat_w=turned_quat)
 
-        # ---- 3d-2. 수직 하강 (high → hover), yaw 고정 ----
+        # ---- 3d-2. 수직 하강 (high → hover), 자연 yaw 고정 ----
         stage_move(above_high, transport_offset,
                    STAGE_DURATION_S["lift"], gripper_close,
-                   "3d-2. Descend to hover",
-                   start_quat_w=cell_target_quat, end_quat_w=cell_target_quat)
+                   "3d-2. Descend to hover (hold natural yaw)",
+                   start_quat_w=turned_quat, end_quat_w=turned_quat)
 
-        # ---- 4. Insert RL align (PPO inference) ----
-        insert_success = stage_rl_insert(args_cli.rl_max_steps, (cx, cy), cyaw)
+        # ---- 4. Insert RL align (PPO inference) — yaw 를 여기서 처음 보정 ----
+        insert_final_yaw, insert_success = stage_rl_insert(args_cli.rl_max_steps, (cx, cy), cyaw)
         if insert_success:
             insert_success_count += 1
+        # downstream(5a/5b/6a) 자세 = RL 최종 yaw (motion 이 다시 cyaw 로 snap 하지 않도록).
+        cell_ee_quat = quat_mul(
+            quat_from_angle_axis(
+                torch.tensor([insert_final_yaw], device=device, dtype=torch.float), _zaxis),
+            base_ee_quat)
+
+        # ---- ★ xy 진단 로그 (RL 직후): grip(=IK holding 대상)과 box(매달림)가 cell xy 에 얼마나 ----
+        _ee_xy = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
+        _bx_xy = (box.data.root_pos_w[0] - env_origin)
+        _ee_err = ((_ee_xy[0].item() - cx) ** 2 + (_ee_xy[1].item() - cy) ** 2) ** 0.5
+        _bx_err = ((_bx_xy[0].item() - cx) ** 2 + (_bx_xy[1].item() - cy) ** 2) ** 0.5
+        _fold = lambda a: abs((((a) + math.pi / 2.0) % math.pi) - math.pi / 2.0)  # 박스 180° 대칭
+        _eyaw1 = math.degrees(_fold(cyaw - quat_z_yaw(grip_center_quat(robot, left_id))[0].item()))
+        _byaw1 = math.degrees(_fold(cyaw - quat_z_yaw(box.data.root_quat_w)[0].item()))
+        print(f"  [xy@RL-end ] cell=({cx:+.3f},{cy:+.3f}) | "
+              f"grip=({_ee_xy[0].item():+.3f},{_ee_xy[1].item():+.3f}) Δgrip={_ee_err*100:5.2f}cm | "
+              f"box=({_bx_xy[0].item():+.3f},{_bx_xy[1].item():+.3f}) Δbox={_bx_err*100:5.2f}cm | "
+              f"Δyaw ee={_eyaw1:4.1f}° box={_byaw1:4.1f}°")
 
         # ---- 5a. Insert descend (TRANSPORT_Z → PLACE_Z, ee xy 는 RL 정렬 끝점 그대로) ----
         cur_ee_2 = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
@@ -825,24 +889,51 @@ def run_pipeline(sim, scene):
                    "5a. Insert descend",
                    start_quat_w=cell_ee_quat, end_quat_w=cell_ee_quat)
 
+        # ---- ★ xy 진단 로그 (5a 하강완료): box 가 cell xy 에 안착됐나 (하강 중 스윙/벽접촉 드리프트 확인) ----
+        _ee_xy2 = (grip_center_pos(robot, left_id, right_id)[0] - env_origin)
+        _bx_xy2 = (box.data.root_pos_w[0] - env_origin)
+        _ee_err2 = ((_ee_xy2[0].item() - cx) ** 2 + (_ee_xy2[1].item() - cy) ** 2) ** 0.5
+        _bx_err2 = ((_bx_xy2[0].item() - cx) ** 2 + (_bx_xy2[1].item() - cy) ** 2) ** 0.5
+        _eyaw2 = math.degrees(_fold(cyaw - quat_z_yaw(grip_center_quat(robot, left_id))[0].item()))
+        _byaw2 = math.degrees(_fold(cyaw - quat_z_yaw(box.data.root_quat_w)[0].item()))
+        print(f"  [xy@descend] cell=({cx:+.3f},{cy:+.3f}) | "
+              f"grip=({_ee_xy2[0].item():+.3f},{_ee_xy2[1].item():+.3f}) Δgrip={_ee_err2*100:5.2f}cm | "
+              f"box=({_bx_xy2[0].item():+.3f},{_bx_xy2[1].item():+.3f}) Δbox={_bx_err2*100:5.2f}cm | "
+              f"Δyaw ee={_eyaw2:4.1f}° box={_byaw2:4.1f}°")
+
         # ---- 5b. Release ----
         stage_hold(descend_end_2, STAGE_DURATION_S["release"], GRIPPER_OPEN,
                    "5b. Release", hold_quat_w=cell_ee_quat)
 
-        # ---- 6a. Retract up (cell yaw → 0 풀기) ----
+        # ---- 데모: 방금 안착한 박스를 누적 표시박스로 복사(셀에 남김) → 다음 run 에서 active box reset 돼도 유지 ----
+        if args_cli.demo_grid:
+            for _ in range(20):   # 박스 안착 안정화
+                scene.write_data_to_sim(); sim.step(); scene.update(dt)
+            _bp = box.data.root_pos_w[0:1].clone()
+            _bq = box.data.root_quat_w[0:1].clone()
+            scene[f"PlacedBox{tgt_cell}"].write_root_pose_to_sim(torch.cat([_bp, _bq], dim=-1))
+            scene[f"PlacedBox{tgt_cell}"].write_root_velocity_to_sim(
+                torch.zeros((1, 6), device=device, dtype=torch.float))
+            print(f"[demo] cell #{tgt_cell} 채움 ({tgt_cell+1}/{n_cells})")
+
+        # ---- 6a. Retract up (수직만 — cell yaw 유지, 손목 안 돎) ----
+        #   ★ 이전엔 여기서 cell_ee_quat→base_ee_quat slerp 으로 yaw 를 풀었는데, 팔이 아직
+        #   turn-around(joint1≈-2.9) 상태라 IK 가 world-yaw-0 자세를 만들려고 joint6 를 ~180° 크랭크
+        #   = "올라올 때 joint6 flip". world yaw 는 joint1 이 만든 것이므로 joint1 으로 풀어야 함(아래 6b).
+        #   여기선 cell_ee_quat 유지 → 빈 그리퍼 순수 수직 상승(셀 벽 클리어).
         retract_pos_actual = torch.tensor(
             [cur_ee_2[0].item(), cur_ee_2[1].item(), RETRACT_Z],
             device=device, dtype=torch.float)
         stage_move(descend_end_2, retract_pos_actual,
                    STAGE_DURATION_S["retract_up"], GRIPPER_OPEN,
-                   "6a. Retract up",
-                   start_quat_w=cell_ee_quat, end_quat_w=base_ee_quat)
+                   "6a. Retract up (vertical, hold yaw)",
+                   start_quat_w=cell_ee_quat, end_quat_w=cell_ee_quat)
 
-        # ---- 6b. Retract home ----
-        stage_move(retract_pos_actual, home_grip_env,
-                   STAGE_DURATION_S["retract_home"], GRIPPER_OPEN,
-                   "6b. Retract home",
-                   start_quat_w=base_ee_quat, end_quat_w=home_grip_quat_w.unsqueeze(0))
+        # ---- 6b. Retract home (joint-space 역-turn) ----
+        #   forward 3c2(joint1-only turn)의 역순. joint1 -2.9→0 untwist 하면 world yaw 가 자연히
+        #   앞으로 풀리고 joint6 는 home 값 유지 → flip 없음 + base 관통 없음(§1 turn-around=joint1만 준수).
+        stage_joint_move(HOME_JOINT_POS, STAGE_DURATION_S["retract_home"], GRIPPER_OPEN,
+                         "6b. Retract home (joint untwist)")
 
         obj_pos_w = box.data.root_pos_w[0] - env_origin
         cell_xy_dist = ((obj_pos_w[0] - cx) ** 2 + (obj_pos_w[1] - cy) ** 2).sqrt().item()

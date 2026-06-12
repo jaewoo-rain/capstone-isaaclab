@@ -37,7 +37,24 @@ _JAEWOO_DIR = _THIS_DIR.parent
 if str(_JAEWOO_DIR) not in sys.path:
     sys.path.insert(0, str(_JAEWOO_DIR))
 
-from camera.coord_transform import CeilingTransform, yaw_from_angle_deg, quat_from_z_yaw
+from camera.coord_transform import (
+    CeilingTransform, quat_from_z_yaw, yaw_cam_to_base,
+)
+
+
+def rect_long_axis_yaw(rect) -> float:
+    """cv2.minAreaRect 결과 → optical 픽셀 프레임 기준 '긴 변' 방향 yaw [rad].
+
+    minAreaRect 가 내는 raw angle 은 어느 변(width/height) 기준인지 모호해서
+    박스 자세에 따라 90° 씩 튄다(→ 그리퍼가 짧은 변 대신 긴 변에 정렬해 파지 실패).
+    boxPoints 로 가장 긴 모서리 방향을 직접 재면 항상 같은 물리 축(긴 변)을 가리키며,
+    이는 박스 180° 대칭과도 일치한다(짧은 변 파지각은 긴 축 ±90°, 하류에서 처리).
+    """
+    pts = cv2.boxPoints(rect)
+    e1 = pts[1] - pts[0]
+    e2 = pts[2] - pts[1]
+    long_edge = e1 if (e1[0] ** 2 + e1[1] ** 2) >= (e2[0] ** 2 + e2[1] ** 2) else e2
+    return math.atan2(float(long_edge[1]), float(long_edge[0]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,11 +126,13 @@ class _YoloSegONNX:
         blob = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
         return blob[np.newaxis], ratio, (dw, dh)
 
-    def _postprocess(self, out0, out1, ratio, dw, dh, orig_H, orig_W):
-        # out0: (116, 8400), out1: (32, 160, 160)
-        results = []
-        preds = out0.T  # (8400, 116)
+    def _postprocess(self, out0, out1, ratio, dw, dh, orig_H, orig_W, iou_thresh=0.5):
+        # out0: (4+num_cls+32, 8400), out1: (32, 160, 160)
+        preds = out0.T  # (8400, 4+num_cls+32)
         num_cls = out0.shape[0] - 4 - 32
+
+        # 1) conf 통과 후보만 수집 (마스크 합성은 NMS 생존분에만 → 비용 절감)
+        boxes_xywh, scores, cls_ids, coefs = [], [], [], []
         for pred in preds:
             cx, cy, bw, bh = pred[:4]
             cls_scores = pred[4:4+num_cls]
@@ -121,29 +140,47 @@ class _YoloSegONNX:
             conf = float(cls_scores[cls_id])
             if conf < self._conf:
                 continue
-            mask_coef = pred[4+num_cls:]  # (32,)
+            x1 = max(0, int((cx - bw/2 - dw) / ratio))
+            y1 = max(0, int((cy - bh/2 - dh) / ratio))
+            x2 = min(orig_W-1, int((cx + bw/2 - dw) / ratio))
+            y2 = min(orig_H-1, int((cy + bh/2 - dh) / ratio))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            boxes_xywh.append([x1, y1, x2 - x1, y2 - y1])
+            scores.append(conf)
+            cls_ids.append(cls_id)
+            coefs.append(pred[4+num_cls:])  # (32,)
 
-            # box → original coords
-            x1 = int((cx - bw/2 - dw) / ratio)
-            y1 = int((cy - bh/2 - dh) / ratio)
-            x2 = int((cx + bw/2 - dw) / ratio)
-            y2 = int((cy + bh/2 - dh) / ratio)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(orig_W-1, x2), min(orig_H-1, y2)
+        if not boxes_xywh:
+            return []
 
-            # prototype mask 합성 (160×160 → orig size)
-            proto = out1  # (32, 160, 160)
-            mask_160 = (mask_coef @ proto.reshape(32, -1)).reshape(160, 160)
+        # 2) per-class IoU NMS — 한 물체당 중복앵커 제거. 다른 클래스끼리는 안 지움
+        #    (box 위에 겹친 cell 을 NMS 로 없애면 안 되므로 클래스별로 따로 수행)
+        cls_arr = np.array(cls_ids)
+        keep: List[int] = []
+        for c in set(cls_ids):
+            idxs = np.where(cls_arr == c)[0]
+            bb = [boxes_xywh[i] for i in idxs]
+            sc = [scores[i] for i in idxs]
+            sel = cv2.dnn.NMSBoxes(bb, sc, self._conf, iou_thresh)
+            if len(sel) > 0:
+                keep.extend(int(idxs[j]) for j in np.array(sel).flatten())
+
+        # 3) 생존분만 prototype mask 합성
+        proto = out1  # (32, 160, 160)
+        results = []
+        for i in keep:
+            mask_160 = (coefs[i] @ proto.reshape(32, -1)).reshape(160, 160)
             mask_160 = 1.0 / (1.0 + np.exp(-mask_160))  # sigmoid
-            # 160×160 → 640×640 → crop → orig
             mask_640 = cv2.resize(mask_160, (640, 640), interpolation=cv2.INTER_LINEAR)
-            # 패딩 제거
             mask_pad = mask_640[dh:dh+int(orig_H*ratio), dw:dw+int(orig_W*ratio)]
             mask_orig = cv2.resize(mask_pad, (orig_W, orig_H), interpolation=cv2.INTER_LINEAR)
             mask_bool = mask_orig > 0.5
 
+            x1, y1, w, h = boxes_xywh[i]
+            cls_id = cls_ids[i]
             label = self._class_names[cls_id] if cls_id < len(self._class_names) else str(cls_id)
-            results.append((label, conf, np.array([x1, y1, x2, y2]), mask_bool))
+            results.append((label, scores[i], np.array([x1, y1, x1+w, y1+h]), mask_bool))
 
         return results
 
@@ -222,9 +259,12 @@ class CeilingDetector:
             if target_labels and label not in target_labels:
                 continue
 
-            # 잘린 마스크 필터 (bbox 가 이미지 경계에 닿으면 제외)
+            is_cell = (label == "cell")
+
+            # 잘린 마스크 필터 — box 에만 적용.
+            # 셀(고정 유압블록)은 천장캠 화면 가장자리에 닿아도 유지(외곽 셀 누락 방지).
             x1, y1, x2, y2 = box_xyxy
-            if x1 <= 1 or y1 <= 1 or x2 >= W-2 or y2 >= H-2:
+            if not is_cell and (x1 <= 1 or y1 <= 1 or x2 >= W-2 or y2 >= H-2):
                 continue
 
             # 마스크 면적 비율 필터
@@ -253,7 +293,12 @@ class CeilingDetector:
 
             # link0 변환
             xy_base, valid = self._tf.pixel_to_base_xy(cx, cy, depth_val, self._K)
-            yaw = yaw_from_angle_deg(angle_deg)
+            # yaw: 셀은 고정 유압블록이라 yaw≈0 (정사각 근처에서 long-axis 90° 토글 회피).
+            #      box 만 긴 변 방향(90° 모호성 제거) → extrinsic 으로 base 변환(Y-down 부호 포함).
+            if is_cell:
+                yaw = 0.0
+            else:
+                yaw = yaw_cam_to_base(rect_long_axis_yaw(rect), self._tf.T)
 
             results.append(DetectionResult(
                 label=label,
@@ -300,11 +345,30 @@ class CeilingDetector:
 # ROS2 노드 (--ros 플래그 사용 시)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pose_from_det(r) -> "object":
+    """DetectionResult → geometry_msgs/Pose (xy=link0, z=깊이 참고, orientation=z-yaw)."""
+    from geometry_msgs.msg import Pose
+    p = Pose()
+    p.position.x = float(r.xy_base[0])
+    p.position.y = float(r.xy_base[1])
+    p.position.z = float(r.depth_m)
+    qw, qx, qy, qz = quat_from_z_yaw(r.yaw_base)
+    p.orientation.w = float(qw); p.orientation.x = float(qx)
+    p.orientation.y = float(qy); p.orientation.z = float(qz)
+    return p
+
+
 def _run_ros_node(args) -> None:
-    """ROS2 노드로 실행: RealSense 스트림 → /vision/box_coarse, /vision/cell_coarse publish."""
+    """ROS2 노드: RealSense → 다중 박스/셀 PoseArray + grasp 타깃 1개 PoseStamped publish.
+
+    토픽:
+      /vision/box_coarse  (PoseArray)    — 검출된 모든 박스
+      /vision/box_target  (PoseStamped)  — grasp 타깃 1개(분포중심 최근접)
+      /vision/cell_coarse (PoseArray)    — 검출된 모든 셀
+    """
     import rclpy
     from rclpy.node import Node
-    from geometry_msgs.msg import PoseStamped
+    from geometry_msgs.msg import PoseStamped, PoseArray
     import pyrealsense2 as rs
 
     detector = CeilingDetector(
@@ -316,10 +380,15 @@ def _run_ros_node(args) -> None:
     if args.classes:
         detector.set_class_names(args.classes.split(","))
 
+    # grasp 타깃 선택 기준 = 학습 분포 중심(rl/grasp/config.BOX_DIST_CENTER_XY). 분포 밖 박스는
+    # 어차피 run_grasp 가 거부하므로 "분포중심 최근접"이 파이프라인과 정합. --target-center 로 override.
+    target_center = np.array(args.target_center, dtype=np.float64)
+
     rclpy.init()
     node = Node("ceiling_detector")
-    pub_box  = node.create_publisher(PoseStamped, "/vision/box_coarse",  10)
-    pub_cell = node.create_publisher(PoseStamped, "/vision/cell_coarse", 10)
+    pub_box    = node.create_publisher(PoseArray,   "/vision/box_coarse", 10)
+    pub_target = node.create_publisher(PoseStamped, "/vision/box_target", 10)
+    pub_cell   = node.create_publisher(PoseArray,   "/vision/cell_coarse", 10)
 
     # RealSense 파이프라인
     pipeline = rs.pipeline()
@@ -329,7 +398,8 @@ def _run_ros_node(args) -> None:
     pipeline.start(config)
     align = rs.align(rs.stream.color)
 
-    node.get_logger().info("[ceiling_detector] 시작 — /vision/box_coarse, /vision/cell_coarse publish 중")
+    node.get_logger().info(
+        "[ceiling_detector] 시작 — /vision/box_coarse(Array), /vision/box_target, /vision/cell_coarse(Array)")
 
     try:
         while rclpy.ok():
@@ -341,25 +411,29 @@ def _run_ros_node(args) -> None:
             results = detector.detect(color_f, depth_f, target_labels=["box", "cell"])
 
             now = node.get_clock().now().to_msg()
-            for r in results:
-                if r.xy_base is None:
-                    continue
-                msg = PoseStamped()
-                msg.header.stamp = now
-                msg.header.frame_id = "link0"
-                msg.pose.position.x = float(r.xy_base[0])
-                msg.pose.position.y = float(r.xy_base[1])
-                msg.pose.position.z = float(r.depth_m)
-                qw, qx, qy, qz = quat_from_z_yaw(r.yaw_base)
-                msg.pose.orientation.w = float(qw)
-                msg.pose.orientation.x = float(qx)
-                msg.pose.orientation.y = float(qy)
-                msg.pose.orientation.z = float(qz)
+            boxes = [r for r in results if r.label == "box" and r.xy_base is not None]
+            cells = [r for r in results if r.label == "cell" and r.xy_base is not None]
 
-                if r.label == "box":
-                    pub_box.publish(msg)
-                elif r.label == "cell":
-                    pub_cell.publish(msg)
+            box_arr = PoseArray()
+            box_arr.header.stamp = now
+            box_arr.header.frame_id = "link0"
+            box_arr.poses = [_pose_from_det(r) for r in boxes]
+            pub_box.publish(box_arr)
+
+            cell_arr = PoseArray()
+            cell_arr.header.stamp = now
+            cell_arr.header.frame_id = "link0"
+            cell_arr.poses = [_pose_from_det(r) for r in cells]
+            pub_cell.publish(cell_arr)
+
+            # grasp 타깃 1개 = 분포중심 최근접 박스
+            if boxes:
+                tgt = min(boxes, key=lambda r: float(np.linalg.norm(r.xy_base - target_center)))
+                tmsg = PoseStamped()
+                tmsg.header.stamp = now
+                tmsg.header.frame_id = "link0"
+                tmsg.pose = _pose_from_det(tgt)
+                pub_target.publish(tmsg)
 
             rclpy.spin_once(node, timeout_sec=0.0)
 
@@ -446,6 +520,9 @@ def main() -> int:
                         help="카메라 인덱스(숫자) or 이미지 파일 경로")
     parser.add_argument("--ros", action="store_true",
                         help="ROS2 노드 모드 (RealSense → topic publish)")
+    parser.add_argument("--target-center", type=float, nargs=2, default=(0.45, -0.10),
+                        metavar=("X", "Y"),
+                        help="grasp 타깃 선택 기준점(분포중심). 최근접 박스를 /vision/box_target 으로 발행")
     args = parser.parse_args()
 
     if args.ros:

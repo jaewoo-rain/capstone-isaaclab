@@ -30,7 +30,7 @@ class InsertEnvCfg(DirectRLEnvCfg):
     # 1. 기본 RL env 설정
     # =========================
     decimation: int = 1
-    episode_length_s: float = 5.0
+    episode_length_s: float = 15.0   # 5→15 테스트: 높은 자세 yaw 제어가 느린(시간부족)지 vs 못하는(제어)지 구분용
 
     action_space: int = 3       # Δx, Δy, Δyaw
     observation_space: int = 7  # slot_rel_x/y, slot_yaw_err, is_grasping, ee_vel_x/y, yaw_vel
@@ -118,15 +118,22 @@ class InsertEnvCfg(DirectRLEnvCfg):
     ee_fixed_z: float = layout.INSERT_HOVER_Z   # 0.20
 
     # handoff dataset 경로 (책상/뒤쪽 분포 v15)
-    handoff_dataset_path: str = "checkpoints/insert_handoff_states_v15.npz"
+    handoff_dataset_path: str = "checkpoints/insert_handoff_states_v16.npz"  # v16: 하강X, high(turn+lift) 위치 handoff
 
-    # ee yaw clip (학습 시 사용)
-    ee_yaw_min: float = -1.5708       # -π/2
-    ee_yaw_max: float =  1.5708       # +π/2
+    # ★ wrap-safe yaw (v25 reference-anchored unwrap) — 절대 ±π clip 폐기.
+    #   배경: turn 후 그리퍼 yaw ~±180°(=wrap 경계). 절대 setpoint 를 ±π 로 hard clamp 하면
+    #   working point 가 경계에 물려 정책이 yaw 조정을 포기(v24: yaw_err 8.5° plateau, success 0.05).
+    #   해결: reset 시 setpoint 기준값 _yaw_ref(=handoff 그리퍼 yaw, ~±180°) 저장 → 누적 setpoint 를
+    #   _yaw_ref ± yaw_margin 로만 제한. quat_from_angle_axis 는 |yaw|>π 도 연속 → wrap 경계 자체가 사라짐.
+    #   margin 은 자연 yaw 오차(fold 후 최대 ~90°)를 넉넉히 덮어야 정상 보정을 안 막음.
+    yaw_margin: float = 1.75          # ~100° (fold 한계 90° + 여유). _yaw_ref 중심 상대 제한.
+    # (deprecated) ee_yaw_min/max — 절대 clip 은 더 이상 안 씀. 호환용으로만 남김.
+    ee_yaw_min: float = -3.14159      # -π
+    ee_yaw_max: float =  3.14159      # +π
     # xy noise 는 handoff dataset 자체에 포함됨 (collect transport stage).
     # ★ yaw noise: reset 에서 _ee_target_yaw 를 handoff(=cell정렬)에서 ±이만큼 흔들어
     #   실제 yaw 오차를 만든다(누적 IK 가 박스를 그리로 돌림) → 정책이 yaw 보정 학습(sim2real 강건성).
-    reset_yaw_noise: float = 0.5      # ±0.5 rad ≈ ±28.6° — yaw-only 학습에서 실제 yaw 보정 과제 생성
+    reset_yaw_noise: float = 0.0      # 0: 방식 B 의 자연 yaw 오차(mean 45°, max 83°)만 사용 — 주입 노이즈 불필요(이미 넓음)
     disable_xy_noise: bool = False
     # ★ yaw-only 모드: xy 는 IK 가 cell 에 고정 holding(정책 제어X), 정책/보상/success 는 yaw 만.
     #   누적 yaw 제어가 xy 를 끌어내는 coupling 때문에 yaw+xy 동시 학습 불가 → xy 는 motion/IK 가 잡고 RL 은 yaw 만.

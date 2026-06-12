@@ -150,9 +150,12 @@ T_cam_to_base:
 
 | 토픽 | 메시지 타입 | 발행자 | 내용 |
 |------|------------|--------|------|
-| `/vision/box_coarse` | `geometry_msgs/PoseStamped` | ceiling_detector | 천장캠 박스 pose (link0) |
-| `/vision/cell_coarse` | `geometry_msgs/PoseStamped` | ceiling_detector | 천장캠 셀 pose (link0) |
+| `/vision/box_coarse` | `geometry_msgs/PoseArray` | ceiling_detector | 천장캠 **모든** 박스 pose (link0) |
+| `/vision/box_target` | `geometry_msgs/PoseStamped` | ceiling_detector | grasp 타깃 1개(분포중심 최근접) |
+| `/vision/cell_coarse` | `geometry_msgs/PoseArray` | ceiling_detector | 천장캠 **모든** 셀 pose (link0) |
 | `/vision/box_fine` | `geometry_msgs/PoseStamped` | wrist_detector | 손목캠 박스 pose (link0) |
+
+> 다중 박스 대응: coarse 는 PoseArray(전체 보존), grasp 는 `box_target`(분포중심 `(0.45,-0.10)` 최근접) 구독.
 
 Pose 규약:
 - `position.x/y` : link0 기준 xy [m]

@@ -47,8 +47,9 @@ if str(_JAEWOO_DIR) not in sys.path:
 
 from camera.coord_transform import (
     pixel_to_cam3d, pixel_to_base_xy_wrist,
-    yaw_from_angle_deg, quat_from_z_yaw, lookup_T_frame,
+    quat_from_z_yaw, yaw_cam_to_base, lookup_T_frame,
 )
+from camera.ceiling_detector import rect_long_axis_yaw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,7 +160,8 @@ class WristDetector:
         if model_path is not None:
             from camera.ceiling_detector import _YoloSegONNX
             self._yolo = _YoloSegONNX(model_path, conf_thresh=0.35)
-            self._yolo.set_class_names(["box"])
+            # 2-클래스 모델이면 box,cell 둘 다 나옴 → 라벨명 부여 후 _detect_seg 에서 box 만 사용.
+            self._yolo.set_class_names(["box", "cell"])
 
     @staticmethod
     def _load_intrinsics(yaml_path) -> np.ndarray:
@@ -232,23 +234,26 @@ class WristDetector:
     ) -> Optional[WristDetectionResult]:
         H, W = depth_m.shape
         raw = self._yolo.infer(color_img)
-        if not raw:
+        # 손목캠은 box 만 대상 — cell(고정블록)은 무시. score 최고 box 선택.
+        boxes = [d for d in raw if d[0] == "box"]
+        if not boxes:
             return None
-
-        label, score, box_xyxy, mask_bool = raw[0]
+        label, score, box_xyxy, mask_bool = max(boxes, key=lambda d: d[1])
         contours, _ = cv2.findContours(
             mask_bool.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
         cnt = max(contours, key=cv2.contourArea)
-        (cx, cy), _, angle_deg = cv2.minAreaRect(cnt)
+        rect = cv2.minAreaRect(cnt)
+        (cx, cy), _, _ = rect
 
         u_i, v_i = int(round(cx)), int(round(cy))
         d_patch = depth_m[max(0,v_i-2):min(H,v_i+3), max(0,u_i-2):min(W,u_i+3)]
         valid_d = d_patch[(d_patch > self._min_depth) & (d_patch < self._max_depth)]
         depth_val = float(np.median(valid_d)) if len(valid_d) > 0 else 0.0
 
-        yaw_cam = yaw_from_angle_deg(angle_deg)
+        # 긴 변 방향으로 yaw 결정(90° 모호성 제거). PCA 경로의 major-axis 와 규약 일치.
+        yaw_cam = rect_long_axis_yaw(rect)
         xy_base, yaw_base = self._transform(cx, cy, depth_val, yaw_cam, T_cam2base)
 
         return WristDetectionResult(
@@ -298,10 +303,9 @@ class WristDetector:
         if not valid:
             return None, yaw_cam
 
-        # T_cam2base 의 z축 회전 성분을 yaw에 더함
-        r00, r10 = T_cam2base[0, 0], T_cam2base[1, 0]
-        offset = math.atan2(r10, r00)
-        yaw_base = (yaw_cam + offset + math.pi) % (2 * math.pi) - math.pi
+        # optical 평면 yaw_cam → base yaw. 천장캠과 동일한 헬퍼 사용(규약 통일).
+        # 단축식 atan2(r10,r00) 은 optical 평면이 base 와 평행할 때만 맞아 폐기.
+        yaw_base = yaw_cam_to_base(yaw_cam, T_cam2base)
 
         return xy_base, yaw_base
 

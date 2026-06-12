@@ -309,8 +309,8 @@ pose:
 현재는 토픽을 받아서 수동으로 좌표를 넘기는 방식. (run_grasp_vision.py 완성 전)
 
 ```bash
-# 1. 천장캠 토픽에서 좌표 읽기
-ros2 topic echo /vision/box_coarse --once
+# 1. 천장캠 토픽에서 좌표 읽기 (box_coarse 는 PoseArray=전체 박스, grasp 는 box_target=타깃 1개)
+ros2 topic echo /vision/box_target --once
 # → x=0.451, y=-0.103, z=0.35 (orientation 에서 yaw 계산)
 
 # 2. 읽은 좌표로 grasp 실행 (dry-run 먼저)

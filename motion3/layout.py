@@ -32,7 +32,7 @@ BOX_SIZE: tuple[float, float, float] = (0.118, 0.044, 0.139)
 _BOX_HALF_Z = BOX_SIZE[2] / 2.0   # 0.0695
 BOX_SPAWN: tuple[float, float, float] = (0.35 , 0.0, _BOX_HALF_Z + 0.005 + TABLE_HEIGHT)  # 책상 위 안착
 BOX_SPAWN_XY_NOISE: float = 0.10   # ±10cm
-BOX_SPAWN_YAW_MAX: float = 1.396   # ±80°
+BOX_SPAWN_YAW_MAX: float = 0.873   # ±50° (±80°→±50°: insert yaw 자연오차 줄여 90° 근처 불가케이스 감소)
 
 # =========================================================================
 # 3. z 상수
@@ -45,7 +45,10 @@ GRASP_Z: float = 0.155 + TABLE_HEIGHT        # 0.45 — 파지 깊이 (박스 �
 LIFT_Z: float = 0.26 + TABLE_HEIGHT         # 0.56 — 책상 위로 들어올림 → 뒤로 운반 높이
 
 # --- 뒤쪽(ground 프레임): insert 정렬은 저고도 hover, place는 셀 바닥 안착 ---
-INSERT_HOVER_Z: float = 0.20   # insert RL ee_fixed_z. 셀 wall top(0.12) 위 → 박스 밑면 충돌 회피.
+INSERT_HOVER_Z: float = LIFT_Z   # insert RL ee_fixed_z(=grip z) = turn+lift 높이(하강 안 함!).
+#   collect: grasp→joint1뒤돌기→xy정렬까지만, 하강 0 → handoff 를 이 높은 위치에서 저장.
+#   여기서 박스밑면 ~0.40 으로 셀 벽(0.12) 훨씬 위 → 관통 없음. RL 은 여기서 yaw 만 정렬.
+#   실제 셀로의 하강/place(=waypoiny new7 z≈0.055)는 chain runner 의 motion planning 전담.
 PLACE_Z: float = 0.070         # 셀 바닥(ground) 안착 시 박스 중심(=_BOX_HALF_Z 0.0695). motion 전담 하강.
 
 # 운반/하강: LIFT_Z 0.56(앞,책상) → INSERT_HOVER_Z 0.20(뒤,ground) 운반 + descend 0.20→0.065.
@@ -56,7 +59,7 @@ PLACE_Z: float = 0.070         # 셀 바닥(ground) 안착 시 박스 중심(=_B
 #    "일자 wide" 배치: 좌우(Y)로 길게 펼치고 뒤쪽(X) 깊이는 얕게 → 전부 base 가까이.
 #    각 셀: 긴 변 0.16(박스 long edge 0.139 수용)을 Y(좌우)로, 짧은 변 0.065를 X(깊이)로.
 # =========================================================================
-CELL_GRID_CENTER: tuple[float, float] = (-0.38, 0.0)   # 뒤쪽(-x). 2깊이가 reach band[0.27~0.50] 안에 들도록.
+CELL_GRID_CENTER: tuple[float, float] = (-0.34, 0.0)   # 뒤쪽(-x). -0.38→-0.34: 로봇/책상 쪽 4cm 당김(책상 gap ~12cm). near col 0.296→0.256, probe_back_reach 로 10칸 IK 검증.
 GRID_NUM_X: int = 2   # X(깊이, 뒤쪽) 방향 셀 수 — 3깊이는 reach 초과 → 2깊이
 GRID_NUM_Y: int = 5   # Y(좌우) 방향 셀 수 → 5좌우 × 2깊이 = 10칸
 # 앞뒤로 깊은 셀: 박스 긴변(0.139)을 X(앞뒤/depth)에, 짧은변(0.044)을 Y(좌우)에.

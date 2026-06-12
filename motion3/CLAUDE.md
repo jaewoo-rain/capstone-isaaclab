@@ -5,28 +5,41 @@
 
 ---
 
-## ⚡ TL;DR — 현재 상태 (2026-06-09 갱신)
+## ⚡ TL;DR — 현재 상태 (2026-06-10 v25 갱신)
 
-**insert success 0%의 진짜 원인 = yaw가 reward 문제도 측정 문제도 아니라 "제어 권한 부재" + "회귀 버그(비누적 target)". 다음 = 손목 직접 yaw 제어 구현 + yaw 노이즈 주입 + 재학습.**
+**해결됨. 근본원인 = 절대 yaw setpoint의 wrap 경계(±π) 함정. 해법 = reference-anchored unwrap(v25): setpoint를 reset 시 측정 grip yaw(`_yaw_ref`)에 anchor하고 `_yaw_ref ± yaw_margin(1.75rad)`로만 누적 제한 → 고정 wrap 경계 소멸. 결과 success 0.05(v24)→0.57(v25), yaw_aligned 0.035→0.58. ① chain parity 수정 완료(stage_rl_insert: xy=cell 고정, yaw=누적 setpoint anchor) — env와 동일 convention.**
 
-### 진단 결론 (probe로 확정 — `scripts/probe_yaw_frame.py`, `probe_yaw_joint6.py`)
-- handoff dataset(v15)는 **정상**: box가 cell에 물리적으로 정렬됨 `|fold(cell−box_yaw)|=mean 2.1°, 95%<5°` (ground-truth=박스 quat 직접). collect의 transport(3d-1)가 모션플래닝으로 yaw 정렬 후 저장하기 때문.
-- `gripper_yaw(_extract_ee_yaw) == box_yaw` (offset 0.26°). 측정 정확, rigid grasp.
-- 그런데 env.step에서 yaw가 **reset 2° → 에피소드 끝 ~80°로 드리프트**(zero-action 3 step만에 18°). yaw action +max ×20 step → Δyaw chaotic(std 66°, ±75°). → IK가 insert hover 자세에서 yaw 제어/유지 불가.
-- v16 학습(선형 cone reward + Gaussian gain50)도 **xy_aligned 0.02→0.38 잘 배움, yaw_aligned 0.006 그대로** → reward로 안 고쳐짐 확정.
+### v25 결과 (2026-06-10, `motion3_insert_v25.zip`)
+| metric | v23 | v24(±π clip) | **v25(anchor)** |
+|---|---|---|---|
+| success/aligned | 0.26 | 0.05 | **0.57** |
+| yaw_aligned(5°) | 0.18 | 0.035 | **0.58** |
+| yaw_err_abs_mean | 30° | 8.5° | **10.9°(0.19rad)** |
+| xy_dist_mean | 4mm | 4mm | 8.9mm |
+- xy 4→8.9mm 증가: 정책이 yaw를 적극 회전→그 coupling이 xy 끌어냄(예상된 trade). 여전히 10mm 임계 안(xy_aligned 0.76).
+- 다음: play_insert 육안확인(joint6 flip 사라졌는지) + chain end-to-end(parity) 검증.
 
-### 근본 원인 2가지
-1. **회귀 버그 — 비누적 yaw target**: grasp_env는 `_ee_target_yaw += delta`(영속 setpoint, 복원력 O, **작동**). insert_env는 `_ee_target_yaw = 측정현재yaw + delta`(매 step 재계산, 복원력 X → 드리프트 래칫). "xy와 동일 패턴"이라며 바꾼 게 grasp의 작동 패턴을 깸. [insert_env.py:138]
-2. **자세 ill-conditioning**: grasp는 앞/높음(IK yaw OK), insert는 뒤/낮음 풀-리치(rotation-about-vertical near-singular → IK chaotic).
+### 핵심 설계 전환 (v23까지 적용 완료)
+- **insert = yaw-only RL**: xy는 IK가 cell에 고정 holding(`cfg.yaw_only=True`, `_pre_physics_step`에서 xy target 미갱신), RL은 **yaw만** 학습. → xy_aligned 0.96/xy_dist **4mm** (xy 완전 해결). 이유: yaw를 적극 IK 제어하면 그 회전이 grip center xy를 끌어내는 coupling 때문에 yaw+xy 동시 불가 (v16~v20에서 xy 0.10 plateau로 확정). xy는 motion/IK가 잡고 RL은 yaw만.
+- **yaw target 누적 복구**: `_ee_target_yaw += delta`(영속 setpoint). 이전 비누적은 회귀버그였음.
+- **기하 수정 (관통 버그)**: 옛날 hover 0.20은 박스 밑면 0.04로 셀 벽(0.12) 7.7cm 관통. → collect의 **하강(3d-2) 제거**, `INSERT_HOVER_Z=LIFT_Z(0.56)`로 올림 → handoff를 turn+lift 높은 위치에서 저장(박스 밑면 0.36, 벽 위 24cm). 실제 셀 하강/place는 chain runner 전담.
+- **방식 B**: collect의 3d-1 이동을 **xy만**(yaw는 turn된 자연값 유지), handoff에 **실제 그리퍼 yaw** 저장 → RL이 자연 yaw 오차 보정. reset_yaw_noise=0(자연오차로 충분).
+- **box spawn yaw ±80°→±50°** (90° 근처 fold경계 불가케이스 감소). 박스 **대칭(방향성 없음, 사용자 확정)** → fold 유지 OK.
+- 데이터: **`insert_handoff_states_v16.npz` (2734개, 3000 수집→슬립 266 필터)**. cfg `handoff_dataset_path`=v16.
 
-### 합의된 수정 방향 (사용자 확정 — sim2real 강건성 목표)
-- yaw도 **진짜 RL 보정 대상**으로 간다 (freeze 안 함). 따라서 **둘 다 필요**:
-  1. **손목 직접 yaw 제어**: 위치(xy,z)=기존 IK 유지, yaw=policy Δyaw를 **joint6(손목 roll)에 직접 누적(영속 setpoint)**. 수직-아래 자세에서 joint6=수직축 yaw. → IK ill-conditioning 우회 + 복원력 확보.
-  2. **yaw 노이즈 주입**: env reset에서 손목을 랜덤 Δ로 돌려 박스째 yaw 오차 생성(재수집 불필요, 매 에피소드 다양). collect보다 reset 주입이 유리.
-- 검증: 외부 probe는 grasp 우회로 박스가 떨어져 신뢰불가 → **env.step 내부(정상 grasp 유지 경로)에서 구현·검증**.
-- 적용해둔 v1 reward(`reward_yaw_lin_w=2.0`, `reward_yaw_align_gain=50`)는 무해하나 효과 없음 — 손목제어 넣은 뒤 재튜닝.
+### ★ 진짜 yaw 근본원인 (2026-06-10 확정 — 이게 결론)
+- v16 handoff의 `ee_target_yaw`(그리퍼 yaw)가 **100% ±90°~±180°**(turn=joint1 회전으로 그리퍼가 뒤를 향함). 그런데 `ee_yaw_min/max` clip이 **±90°**였음.
+- → reset 순간 setpoint=clamp(±180°,±90°)=±90° ≠ 그리퍼(±180°) → IK가 그리퍼를 90~180° **홱 회전**(=사용자가 본 "joint6 휙 돌림") + 매 에피소드 그 회전에 시간낭비 → **yaw success 0.26(v23) 한계**.
+- v21(낮은 0.20, yaw 0.85)이 괜찮았던 건 그땐 method A(cyaw 저장, ±90° 안)였기 때문. method B(실제 ±180° 저장)+±90°clip이 겹쳐 망가짐. **즉 "높이 0.56 때문"이 아니라 clip 불일치가 주범.**
+- **수정 → v24 결과(2026-06-10 완료): `ee_yaw ±π` 적용.** `yaw_err_abs_mean 30°→8.5°`(flip 사라지고 일관되게 근접 — **clip이 근본원인 확정**). **BUT `yaw_aligned(5°내) 0.18→0.035, success 0.26→0.05`로 오히려 낮음** — 8.5°에 모여있지만 5° 밑으로 못 조임(±180° wrap 경계 진동 추정). xy는 여전히 완벽(4mm).
+- **v24 play_insert 육안확인(사용자, 2026-06-10): 정책이 yaw를 거의 안 돌림(수동적).** 즉 ±π clip이 flip은 없앴지만 **±180° wrap 경계에서 yaw action이 불안정 → 학습이 "yaw 돌려도 보상 안정적 증가 X"로 판단해 yaw 조정 포기**(success 0.05 < v23 0.26). yaw_err 8.5°는 적극정렬이 아니라 거의-정렬 시작값에 머문 것.
+- **★해결(v25) = reference-anchored unwrap (unwrap 누적 채택).** `insert_env`: `_yaw_ref` 버퍼 추가, reset 시 `_yaw_ref=_ee_target_yaw=ee_target_yaw_d(측정 grip yaw)`, `_pre_physics_step`에서 `clamp(_yaw_ref-m, _yaw_ref+m)` (m=`cfg.yaw_margin`=1.75). 절대 ±π clamp 폐기 — quat은 |yaw|>π 연속이라 margin이 yaw_ref와 함께 움직여 고정 wrap 경계가 사라짐. margin은 fold 한계 90°를 덮어야(자연오차 최대 83°) 정상 보정 안 막음. → success 0.57(위 표). **±π clip 단독(v24)은 답 아니었음**(flip은 고쳤으나 학습 망침) — anchor가 핵심.
 
-이전 실패: 첫 학습은 `is_grasping=0` → 박스 위에서 잡아 매달려 box_z 임계 미달 → 완화(box_drop_z 0.085, grasping_dist 0.12)로 해결. ckpt `motion3_insert_v15a_isgrasp0_failed.zip`. yaw 실패 학습 = `motion3_insert.zip`(v15), `motion3_insert_v16.zip`(cone reward, yaw 여전히 실패).
+### 폐기된 가설들 (시간 낭비 방지 — 다시 파지 말 것)
+- "reward 문제" ✗ (cone/gain 튜닝 다 효과 없었음). "측정 프레임 90° offset" ✗ (gripper==box yaw). "손목 joint6 직접제어 필요" ✗ (probe가 grip 느슨해 box drop으로 오판, 실제론 누적복구로 IK가 yaw 추종함). "hover 0.30으로 낮춰야" △ (clip이 진짜 원인이라 height 영향 작을 수도 — v24로 확인).
+
+### ckpt 이력
+**`motion3_insert_v25.zip`=현 최선(reference-anchored unwrap, success 0.57, yaw_aligned 0.58, xy 8.9mm).** v24=±π clip(0.05, 학습망침). v23=±90°clip(0.26). v21=옛 낮은기하. v16~v20=실패 이력. chain 기본 insert_checkpoint는 아직 `motion3_insert.zip` — **v25로 갱신 필요**(또는 chain --insert_checkpoint로 지정).
 
 ---
 
@@ -48,6 +61,15 @@
 - 박스 **서있는 형태** `(0.118 앞뒤, 0.044 좌우-잡는변, 0.139 높이)`. 벽(0.12)보다 높이 솟는 게 정상.
 - 셀 **5좌우 × 2깊이 = 10칸**, 뒤쪽(-x) 중심 (-0.38, 0). 셀 깊이(0.16)가 앞뒤. "거의 일자" → cell yaw ±10°.
 - **박스 180° 대칭** → insert yaw 오차 ±90° fold (`fold_yaw_sym`), transport도 cyaw/cyaw+π 가까운 쪽 선택.
+
+### ★ place 하강 드리프트 — 현재 미해결 병목 (2026-06-10)
+- **증상**: insert RL은 grip xy를 cell에 **0.4cm로 완벽 정렬**(yaw도 ee 0.4~2.4°). 그런데 그 뒤 **place 깊이로 하강하면 grip xy가 -x(뒤)로 ~8~10cm 드리프트**(near·far 셀 모두). 적재 실패의 진짜 원인 = yaw·RL 아니라 **하강 motion/IK**.
+- **진단(chain xy 로그 [xy@RL-end]/[xy@descend] 8+5 run)**: 드리프트는 **하강 거리에 비례하는 lag 아니라 endpoint 문제** — RL hover를 0.56→0.32로 낮춰 하강 49→25cm로 줄여도 드리프트 ~10cm 그대로. 즉 도착점(z≈0.07 place 깊이)에서 IK가 그 xy를 못 잡음(팔이 뻗으며 EE가 -x로 미끄러짐). DLS damping under-reach + orientation-lock(수직down 고정) 합성. **reach 거리 가설은 반박**(near 셀도 동일 드리프트).
+- **A 적용(저-hover, v25 재사용·재학습X, 사용자 확정 "A로")**: chain `RL_HOVER_Z`(layout 무변경, TRANSPORT_Z만 override) + 5a insert duration 1.5→2.5. 드리프트 자체는 안 줄지만 **박스를 셀에 더 가까이 놓아 벽 funneling** → 최종 적재 개선.
+- **hover-sweep 결과 (RL_HOVER_Z 튜닝)**: **0.32 = sweet spot** (4 run 최종 1~5cm, 무사고). **0.28 로 더 내리면 박스가 벽 모서리에 걸려 텀블 — run4 33cm/box yaw 58° 카타스트로피**(near 일부는 2cm로 개선되나 위험). **0.56(원본) = 0.2~18cm 들쭉날쭉**. ★벽(0.12)이 하드 제약이라 hover를 0.32 밑으로 못 내림 + grip descend 드리프트(~10cm)는 어느 hover에서도 동일(endpoint). near 셀 ~5cm 가 hover-only 접근의 바닥.
+- **near 셀 sub-5cm 하려면 hover 아닌 다른 레버 필요**(closed-loop 하강+벽인지 xy / place 전용 arm config / box-drop+tip제어) — probe(place reach) 검증 필요한데 env wedge 로 보류.
+- **남은 레버(미적용, A와 직교)**: near 셀 더 조이려면 place-깊이 reach 개선 — (a) 셀 당김, (b) TABLE_HEIGHT↑(far hover reach 트레이드), (c) box-drop(낙하 품질 risk), (d) place 전용 arm seed/config, (e) closed-loop 하강. 에이전트 2(ik-motion-planner/Plan) 논의: 모션패치(seed/느린하강) vs 셀당김 — 데이터는 endpoint라 셀당김 효과 제한적.
+- yaw 로그: ee yaw 하강 중에도 0.4~2.4° 유지(안 틀어짐). box yaw는 0.9~16.6°(벽 접촉·안착 시 회전) — RL/yaw는 병목 아님 확정.
 
 **검증된 핵심 결정 (변경 금지)**:
 - IK: `DifferentialIKController(dls)`, EE=양 finger 평균, base_ee_quat=(0,1,0,0)(수직아래).
@@ -105,18 +127,18 @@ source /home/jaewoo/miniconda3/etc/profile.d/conda.sh && conda activate env_isaa
 
 ---
 
-## 4. 다음 할 일 (우선순위) — yaw 제어 재설계
+## 4. 다음 할 일 (우선순위) — 2026-06-10 (v25 갱신)
 
-1. **★ 손목 직접 yaw 제어 구현** (`insert_env.py`):
-   - `_pre_physics_step`: yaw target을 **누적**으로 복구 (`_ee_target_yaw += delta_yaw`, grasp 패턴). 비누적 제거.
-   - `_apply_action`: 위치 IK는 유지하되 yaw를 **joint6 직접 오프셋**으로. (a) IK는 고정 reference yaw(예: 0 또는 cell_yaw)로 수직자세 풀고, (b) 최종 `joint6_target = ik_joint6 + (_ee_target_yaw − reference)` 식으로 손목에 yaw 누적. 또는 grasp처럼 GRASP_JOINT1_CLAMP 적용해 IK가 손목으로 yaw 풀게.
-   - **검증**: env.step 안에서 Δyaw 명령에 box_yaw가 깨끗이(monotonic, 박스 유지) 추종하는지. joint6 아니면 인덱스만 교체.
-2. **yaw 노이즈 주입** (`_reset_idx`): handoff joint_pos 로드 후 손목 관절을 `±YAW_NOISE`(예: ±30~80°) 랜덤 회전 → 박스째 yaw 오차. obs/reward는 box(=gripper) yaw vs cell_yaw로 측정(이미 그러함).
-3. **reward 재튜닝**: 손목제어로 yaw 제어 가능해지면 v1 cone reward로 충분한지 확인, 부족하면 조정. → 재학습(~3분) → play_insert success 확인.
-4. **S10 chain 통합 검증**: `play_motion_chain_with_grasp_insert.py` — grasp→turn→insert→place 전체. **단 chain runner도 insert 단계 yaw 제어를 손목 직접제어로 동일하게 맞춰야 함**(env와 control parity).
-5. (선택) GRASP_Z 기하 / 미래 카메라·비전(motion2 `inference/` 재사용).
+1. ✅ **done — v25(reference-anchored unwrap) 학습**: success 0.57(위 표). 코드: insert_env(`_yaw_ref` anchor + `yaw_margin` clamp), insert_env_cfg(`yaw_margin=1.75`).
+2. ✅ **done — chain runner parity 수정** (`stage_rl_insert`): 버그A(비누적+±90°clip→누적 anchor `ee_target_yaw_acc`, stage 진입 시 `quat_z_yaw(grip)`로 init, `clamp(yaw_ref±RL_INSERT_YAW_MARGIN=1.75)`), 버그B(정책 xy 버리고 xy=cell 고정). env yaw_only convention과 일치. **검증중**: `/tmp/chain_v25.log` (repeat 5, v25 ckpt) — insert success / 최종 box-cell 거리 확인.
+2.5. ✅ **done — chain yaw 주체를 RL 로 이관 (2026-06-10, 사용자 지적)**: 이전엔 3d-1 이 **정확한 cyaw 로 yaw 를 pre-align** 해 RL 전에 yaw 가 다 맞아 RL 우회(=chain 에서 yaw 즉시성공은 motion 덕, RL 아님). sim 에선 되나 **실물은 cyaw 가 비전추정이라 무너짐**. → 3d-1/3d-2 를 **자연 yaw(turned_quat) 유지**로 바꾸고, **stage 4 RL 이 yaw 보정**, RL 최종 yaw(`insert_final_yaw`)를 downstream(5a/5b/6a) `cell_ee_quat` 으로 사용(motion 이 다시 cyaw 로 snap 안 함). branch 선택(cyaw/cyaw+π)은 RL obs 의 fold_yaw_sym 이 자동 처리 → 제거. **결과 chain yaw 성공은 이제 v25 실제치(~0.57) 반영**(이전 인플레된 ~1.0 아님 — 정직/sim2real 충실). 미검증: 재실행 육안확인 필요.
+3. **★ 다음**: (a) play_insert 육안확인 — `./isaaclab.sh -p source/motion3/scripts/play_insert.py --checkpoint checkpoints/motion3_insert_v25.zip --vecnorm checkpoints/motion3_insert_v25_vecnorm.pkl --episodes 30` 로 joint6 flip 사라지고 yaw 적극 정렬 확인. (b) chain 기본 ckpt를 v25로 갱신(`cp` 또는 default 인자 변경). (c) success 0.57 더 올릴지(yaw threshold/reward gain 추가 튜닝 or xy coupling 완화).
+4. **데모 정리**: chain `--demo_grid`(이미 구현 — 고정그리드+셀 0→9 순차+박스 누적, `PlacedBox0~9` kinematic). parity 검증 후 `--demo_grid --repeat 10 --hold_s -1`로 깨끗한 적재 데모.
+5. (선택) 카메라·비전(motion2 `inference/` 재사용), real robot(motion2/jaewoo/rl) 배포.
 
-**주의:** 손목 직접제어는 "turn-around=joint1만, joint5/6 안 돎"(§1 변경금지)과 의도적으로 다름 — insert 단계 한정 yaw 제어용. turn-around 자체는 그대로.
+**주의:** turn-around=joint1만(§1 변경금지)은 유지. insert는 yaw-only(xy=IK 고정)로 확정 — 손목 직접제어는 폐기(누적복구로 IK가 yaw 추종됨).
+
+**신규/수정 파일(2026-06-10):** `scripts/preview_grid_filled.py`(5×2 박스 정적 씬), `scripts/probe_yaw_{frame,joint6,verify}.py`, `scripts/probe_waypoint_fk.py`. insert_env(yaw_only/누적/reset노이즈/±π clip), insert_env_cfg(yaw_only=True, reset_yaw_noise=0, ee_yaw ±π, handoff=v16, reward gxy40/yaw_lin0.4/gain50), layout(INSERT_HOVER_Z=LIFT_Z, BOX_SPAWN_YAW_MAX=0.873), collect(3d-2제거+방식B+flush), chain(--demo_grid).
 
 ---
 
